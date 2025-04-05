@@ -2,11 +2,18 @@
     "name": "agentmail-mcp",
     "version": "0.1.0",
     "description": "AgentMail MCP Server",
-    "main": "index.js",
+    "type": "module",
+    "bin": {
+        "agentmail-mcp": "dist/index.js"
+    },
+    "files": [
+        "dist"
+    ],
     "scripts": {
+        "build": "tsc",
         "lint": "eslint .",
-        "test": "echo \"Error: no test specified\" && exit 1",
-        "prettier": "prettier --write ."
+        "prettier": "prettier --write .",
+        "test": "echo \"Error: no test specified\" && exit 1"
     },
     "keywords": [],
     "author": "AgentMail <support@agentmail.to>",
@@ -22,5 +29,9 @@
         "ts-node": "^10.9.2",
         "typescript": "^5.8.2",
         "typescript-eslint": "^8.26.1"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.8.0",
+        "agentmail-toolkit": "^0.1.17"
     }
 }
