@@ -32,6 +32,7 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.8.0",
-        "agentmail-toolkit": "^0.1.17"
+        "agentmail": "^0.0.23",
+        "agentmail-toolkit": "^0.1.19"
     }
 }

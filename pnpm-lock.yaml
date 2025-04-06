@@ -11,9 +11,12 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.8.0
         version: 1.8.0
+      agentmail:
+        specifier: ^0.0.23
+        version: 0.0.23
       agentmail-toolkit:
-        specifier: ^0.1.17
-        version: 0.1.17(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2))
+        specifier: ^0.1.19
+        version: 0.1.19(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2))
     devDependencies:
       '@eslint/js':
         specifier: ^9.22.0
@@ -273,8 +276,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agentmail-toolkit@0.1.17:
-    resolution: {integrity: sha512-eKwGFe9dbQ/vnNNZVnyaWmuzOdTAkvQwp0k2jUb6EMmGwhoi4puyolNqyQX65/QdDmOTic/vEjeJs0oANGqqqg==}
+  agentmail-toolkit@0.1.19:
+    resolution: {integrity: sha512-6zhsVNfQFhz5x4ouAp7vtryNs4LsO7ncUPC+WGs/UVB7GnXqZYHdGAJpaawdBm31/blKftZIRLTPjvvrrE4edQ==}
     peerDependencies:
       '@langchain/core': ^0.3.43
       '@modelcontextprotocol/sdk': ^1.8.0
@@ -1428,7 +1431,7 @@ snapshots:
 
   acorn@8.14.1: {}
 
-  agentmail-toolkit@0.1.17(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2)):
+  agentmail-toolkit@0.1.19(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2)):
     dependencies:
       '@langchain/core': 0.3.43
       '@modelcontextprotocol/sdk': 1.8.0
