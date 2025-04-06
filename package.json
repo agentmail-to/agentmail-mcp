@@ -1,6 +1,6 @@
 {
     "name": "agentmail-mcp",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "AgentMail MCP Server",
     "type": "module",
     "bin": {
@@ -15,7 +15,10 @@
         "prettier": "prettier --write .",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
-    "keywords": [],
+    "keywords": [
+        "AgentMail",
+        "MCP"
+    ],
     "author": "AgentMail <support@agentmail.to>",
     "license": "MIT",
     "packageManager": "pnpm@10.6.4",
@@ -32,7 +35,6 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.8.0",
-        "agentmail": "^0.0.23",
         "agentmail-toolkit": "^0.1.19"
     }
 }
