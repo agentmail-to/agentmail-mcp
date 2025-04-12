@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { AgentMailMcpServer } from 'agentmail-toolkit/mcp'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
