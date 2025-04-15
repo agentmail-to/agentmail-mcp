@@ -12,8 +12,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       agentmail-toolkit:
-        specifier: ^0.1.19
-        version: 0.1.19(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2))
+        specifier: ^0.1.20
+        version: 0.1.20(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2))
     devDependencies:
       '@eslint/js':
         specifier: ^9.22.0
@@ -273,8 +273,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agentmail-toolkit@0.1.19:
-    resolution: {integrity: sha512-6zhsVNfQFhz5x4ouAp7vtryNs4LsO7ncUPC+WGs/UVB7GnXqZYHdGAJpaawdBm31/blKftZIRLTPjvvrrE4edQ==}
+  agentmail-toolkit@0.1.20:
+    resolution: {integrity: sha512-m0BDV8CE6G+1urTUQLLCTwFdbsILlL1EyLjopxd/Z+FphA+mb8JsxzMiZpneJpNM+r+xmv3Z3NmuyJsCyz2eEA==}
     peerDependencies:
       '@langchain/core': ^0.3.43
       '@modelcontextprotocol/sdk': ^1.8.0
@@ -741,8 +741,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  langsmith@0.3.15:
-    resolution: {integrity: sha512-cv3ebg0Hh0gRbl72cv/uzaZ+KOdfa2mGF1s74vmB2vlNVO/Ap/O9RYaHV+tpR8nwhGZ50R3ILnTOwSwGP+XQxw==}
+  langsmith@0.3.16:
+    resolution: {integrity: sha512-P3Y0YGHzixgnHuuir2mHZCw6heIeZMFLEmQqVrspy9w57+zwk4PJV6+wP6JrNd/gvt5oKHoN11368GnjO8lE5g==}
     peerDependencies:
       openai: '*'
     peerDependenciesMeta:
@@ -1271,7 +1271,7 @@ snapshots:
       camelcase: 6.3.0
       decamelize: 1.2.0
       js-tiktoken: 1.0.19
-      langsmith: 0.3.15
+      langsmith: 0.3.16
       mustache: 4.2.0
       p-queue: 6.6.2
       p-retry: 4.6.2
@@ -1428,7 +1428,7 @@ snapshots:
 
   acorn@8.14.1: {}
 
-  agentmail-toolkit@0.1.19(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2)):
+  agentmail-toolkit@0.1.20(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.8.0)(ai@4.2.10(react@19.1.0)(zod@3.24.2)):
     dependencies:
       '@langchain/core': 0.3.43
       '@modelcontextprotocol/sdk': 1.8.0
@@ -1924,7 +1924,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  langsmith@0.3.15:
+  langsmith@0.3.16:
     dependencies:
       '@types/uuid': 10.0.0
       chalk: 4.1.2
