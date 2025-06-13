@@ -1,6 +1,6 @@
 {
     "name": "agentmail-mcp",
-    "version": "0.1.4",
+    "version": "0.1.5",
     "description": "AgentMail MCP Server",
     "type": "module",
     "bin": {
@@ -35,6 +35,6 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.12.1",
-        "agentmail-toolkit": "^0.1.21"
+        "agentmail-toolkit": "^0.1.23"
     }
 }
