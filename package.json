@@ -1,6 +1,6 @@
 {
     "name": "agentmail-mcp",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "description": "AgentMail MCP Server",
     "type": "module",
     "bin": {
@@ -23,9 +23,9 @@
     "license": "MIT",
     "packageManager": "pnpm@10.6.4",
     "devDependencies": {
-        "@eslint/js": "^9.28.0",
+        "@eslint/js": "^9.29.0",
         "@types/node": "^24.0.1",
-        "eslint": "^9.28.0",
+        "eslint": "^9.29.0",
         "eslint-config-prettier": "^10.1.5",
         "globals": "^16.2.0",
         "prettier": "3.5.3",
@@ -34,8 +34,8 @@
         "typescript-eslint": "^8.34.0"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.12.1",
+        "@modelcontextprotocol/sdk": "^1.12.3",
         "agentmail": "^0.0.34",
-        "agentmail-toolkit": "^0.1.24"
+        "agentmail-toolkit": "^0.1.25"
     }
 }
