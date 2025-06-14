@@ -1,10 +1,11 @@
 #!/usr/bin/env node
+import { AgentMailClient, AgentMailEnvironment } from 'agentmail'
+import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
-import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
-
-function parseToolsArg(): string[] | undefined {
+const parseToolsArg = () => {
     const args = process.argv.slice(2)
 
     const toolsIndex = args.indexOf('--tools')
@@ -19,11 +20,31 @@ function parseToolsArg(): string[] | undefined {
     return toolsArg.split(',').map((tool) => tool.trim())
 }
 
-async function main() {
+const parseAgentMailEnv = () => {
+    const env = process.env.AGENTMAIL_ENVIRONMENT?.toLowerCase()
+
+    switch (env) {
+        case 'development':
+        case 'dev':
+            return AgentMailEnvironment.Development
+        case 'production':
+        case 'prod':
+        default:
+            return AgentMailEnvironment.Production
+    }
+}
+
+const main = async () => {
+    const environment = parseAgentMailEnv()
+    const toolNames = parseToolsArg()
+
+    const client = new AgentMailClient({ environment })
+    const toolkit = new AgentMailToolkit(client)
+
     const server = new McpServer({ name: 'AgentMail', version: '0.1.0' })
     const transport = new StdioServerTransport()
 
-    for (const tool of new AgentMailToolkit().getTools(parseToolsArg())) {
+    for (const tool of toolkit.getTools(toolNames)) {
         server.tool(tool.name, tool.description, tool.paramsSchema, tool.callback)
     }
 

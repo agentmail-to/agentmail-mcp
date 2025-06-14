@@ -11,6 +11,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.1
         version: 1.12.1
+      agentmail:
+        specifier: ^0.0.34
+        version: 0.0.34
       agentmail-toolkit:
         specifier: ^0.1.24
         version: 0.1.24(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.12.1)(ai@4.2.10(react@19.1.0)(zod@3.25.64))
