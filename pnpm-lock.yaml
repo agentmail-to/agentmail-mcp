@@ -12,11 +12,11 @@ importers:
         specifier: ^1.12.3
         version: 1.12.3
       agentmail:
-        specifier: ^0.0.34
-        version: 0.0.34
+        specifier: ^0.0.37
+        version: 0.0.37
       agentmail-toolkit:
-        specifier: ^0.1.25
-        version: 0.1.25(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.12.3)(ai@4.2.10(react@19.1.0)(zod@3.25.64))
+        specifier: ^0.1.26
+        version: 0.1.26(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.12.3)(ai@4.2.10(react@19.1.0)(zod@3.25.64))
     devDependencies:
       '@eslint/js':
         specifier: ^9.29.0
@@ -288,15 +288,15 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agentmail-toolkit@0.1.25:
-    resolution: {integrity: sha512-gVyvFziakX/45vVoVAwEXDTwynBE6WIq2PV0MTW4UZo0pgfL3zM2wtJXB5ApCKe6dkE58w9emrsdeXAzU5UkbQ==}
+  agentmail-toolkit@0.1.26:
+    resolution: {integrity: sha512-DbiT82DrJypwF/42DyB5p3fmhE9Tg3qlkNOWT1fVTwXeZVoS3to3eqqYXdnBy684y9L305wvgVIOhKjeAeyoqw==}
     peerDependencies:
       '@langchain/core': ^0.3.58
       '@modelcontextprotocol/sdk': ^1.12.1
       ai: ^4.3.16
 
-  agentmail@0.0.34:
-    resolution: {integrity: sha512-L5t3Owmkc+bBQgUcxQLO2HBVVLkBm0mWYLbhN4lc9OZZ9lgQ06z+PSqcFR99SFs47xH/qmc5s621Sp1y987VfA==}
+  agentmail@0.0.37:
+    resolution: {integrity: sha512-/JiwqeTrRQQOUrrVGQIm1/sHLN0YCVSBRZeEfueSsAx6LxtbnDZ4WIebIZHZ7JGegOWoXRA9y/Da0ZH3NKDSPQ==}
 
   ai@4.2.10:
     resolution: {integrity: sha512-rOfKbNRWlzwxbFll6W9oAdnC0R5VVbAJoof+p92CatHzA3reqQZmYn33IBnj+CgqeXYUsH9KX9Wnj7g2wCHc9Q==}
@@ -1467,17 +1467,17 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  agentmail-toolkit@0.1.25(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.12.3)(ai@4.2.10(react@19.1.0)(zod@3.25.64)):
+  agentmail-toolkit@0.1.26(@langchain/core@0.3.43)(@modelcontextprotocol/sdk@1.12.3)(ai@4.2.10(react@19.1.0)(zod@3.25.64)):
     dependencies:
       '@langchain/core': 0.3.43
       '@modelcontextprotocol/sdk': 1.12.3
-      agentmail: 0.0.34
+      agentmail: 0.0.37
       ai: 4.2.10(react@19.1.0)(zod@3.25.64)
       zod: 3.25.64
     transitivePeerDependencies:
       - encoding
 
-  agentmail@0.0.34:
+  agentmail@0.0.37:
     dependencies:
       form-data: 4.0.3
       formdata-node: 6.0.3
