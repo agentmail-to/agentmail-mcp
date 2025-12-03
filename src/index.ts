@@ -44,9 +44,7 @@ const main = async () => {
     const server = new McpServer({ name: 'AgentMail', version: '0.1.0' })
     const transport = new StdioServerTransport()
 
-    for (const tool of toolkit.getTools(toolNames)) {
-        server.registerTool(tool.name, tool, tool.cb)
-    }
+    for (const tool of toolkit.getTools(toolNames)) server.registerTool(tool.name, tool, tool.cb)
 
     await server.connect(transport)
 }
