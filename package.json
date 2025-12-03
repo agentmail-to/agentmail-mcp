@@ -4,13 +4,13 @@
     "description": "AgentMail MCP Server",
     "type": "module",
     "bin": {
-        "agentmail-mcp": "dist/index.js"
+        "agentmail-mcp": "build/index.js"
     },
     "files": [
-        "dist"
+        "build"
     ],
     "scripts": {
-        "build": "tsc && chmod 755 dist/index.js",
+        "build": "tsc && chmod 755 build/index.js",
         "lint": "eslint .",
         "prettier": "prettier --write .",
         "test": "echo \"Error: no test specified\" && exit 1"
