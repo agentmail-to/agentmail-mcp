@@ -1,6 +1,6 @@
 {
     "name": "agentmail-mcp",
-    "version": "0.1.13",
+    "version": "0.1.14",
     "description": "AgentMail MCP Server",
     "type": "module",
     "bin": {
@@ -10,7 +10,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "tsc",
+        "build": "tsc && chmod 755 dist/index.js",
         "lint": "eslint .",
         "prettier": "prettier --write .",
         "test": "echo \"Error: no test specified\" && exit 1"
