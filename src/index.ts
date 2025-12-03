@@ -45,7 +45,7 @@ const main = async () => {
     const transport = new StdioServerTransport()
 
     for (const tool of toolkit.getTools(toolNames)) {
-        server.tool(tool.name, tool.description, tool.paramsSchema, tool.callback)
+        server.registerTool(tool.name, { description: tool.description, inputSchema: tool.paramsSchema }, tool.callback)
     }
 
     await server.connect(transport)
