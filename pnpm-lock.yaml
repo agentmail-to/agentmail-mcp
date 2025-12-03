@@ -15,8 +15,8 @@ importers:
         specifier: ^0.1.8
         version: 0.1.8
       agentmail-toolkit:
-        specifier: ^0.1.31
-        version: 0.1.31(@cfworker/json-schema@4.1.1)(@opentelemetry/api@1.9.0)
+        specifier: ^0.1.33
+        version: 0.1.33(@cfworker/json-schema@4.1.1)(@opentelemetry/api@1.9.0)
     devDependencies:
       '@eslint/js':
         specifier: ^9.29.0
@@ -359,8 +359,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agentmail-toolkit@0.1.31:
-    resolution: {integrity: sha512-yzuEzX+xyAZLPaYbD13fCVoCGn2lolF4v+iIYlQsWgad8uOJjcOAipkdFc6NPZD5+rSUusfGQ0Sfdku9ceeiVA==}
+  agentmail-toolkit@0.1.33:
+    resolution: {integrity: sha512-7AmUc4wCguk6I8HtgwUUrV49CBCSus527//MqeymJi+oZN/05b2NzdHLzo65376hNGalALOPSBKbotb+YoI0aA==}
 
   agentmail@0.1.8:
     resolution: {integrity: sha512-j2C7REuIeyF0YuCcHrrys3vOlhaDQ0XCZJ9xJYcQeUJNUua59LZC5I1OeVDUjrOIZE0jNQcfBggMhNicljk0yw==}
@@ -1606,7 +1606,7 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  agentmail-toolkit@0.1.31(@cfworker/json-schema@4.1.1)(@opentelemetry/api@1.9.0):
+  agentmail-toolkit@0.1.33(@cfworker/json-schema@4.1.1)(@opentelemetry/api@1.9.0):
     dependencies:
       '@langchain/core': 1.1.1(@opentelemetry/api@1.9.0)
       '@modelcontextprotocol/sdk': 1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)
