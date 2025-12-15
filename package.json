@@ -1,27 +1,31 @@
 {
     "name": "agentmail-mcp",
-    "version": "0.1.19",
+    "version": "0.1.20",
     "description": "AgentMail MCP Server",
-    "type": "module",
-    "bin": {
-        "agentmail-mcp": "build/index.js"
-    },
-    "files": [
-        "build"
-    ],
     "scripts": {
         "build": "tsc && chmod 755 build/index.js",
         "lint": "eslint .",
-        "prettier": "prettier --write .",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "prettier": "prettier --write ."
     },
-    "keywords": [
-        "AgentMail",
-        "MCP"
-    ],
+    "keywords": ["agentmail", "mcp", "server", "tools"],
     "author": "AgentMail <support@agentmail.cc>",
     "license": "MIT",
+    "homepage": "https://agentmail.to",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/agentmail-to/agentmail-mcp.git"
+    },
     "packageManager": "pnpm@10.6.4",
+    "type": "module",
+    "files": ["build"],
+    "bin": {
+        "agentmail-mcp": "build/index.js"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.24.1",
+        "agentmail": "^0.1.8",
+        "agentmail-toolkit": "^0.1.37"
+    },
     "devDependencies": {
         "@eslint/js": "^9.29.0",
         "@types/node": "^24.0.1",
@@ -32,10 +36,5 @@
         "ts-node": "^10.9.2",
         "typescript": "^5.8.3",
         "typescript-eslint": "^8.34.0"
-    },
-    "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.24.1",
-        "agentmail": "^0.1.8",
-        "agentmail-toolkit": "^0.1.37"
     }
 }
