@@ -7,7 +7,12 @@
         "lint": "eslint .",
         "prettier": "prettier --write ."
     },
-    "keywords": ["agentmail", "mcp", "server", "tools"],
+    "keywords": [
+        "agentmail",
+        "mcp",
+        "server",
+        "tools"
+    ],
     "author": "AgentMail <support@agentmail.cc>",
     "license": "MIT",
     "homepage": "https://agentmail.to",
@@ -17,7 +22,9 @@
     },
     "packageManager": "pnpm@10.6.4",
     "type": "module",
-    "files": ["build"],
+    "files": [
+        "build"
+    ],
     "bin": {
         "agentmail-mcp": "build/index.js"
     },
