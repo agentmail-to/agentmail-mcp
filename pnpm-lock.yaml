@@ -12,11 +12,11 @@ importers:
         specifier: ^1.24.1
         version: 1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)
       agentmail:
-        specifier: ^0.1.8
-        version: 0.1.8
+        specifier: ^0.1.11
+        version: 0.1.11
       agentmail-toolkit:
-        specifier: ^0.1.37
-        version: 0.1.37(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13))
+        specifier: ^0.1.39
+        version: 0.1.39(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13))
     devDependencies:
       '@eslint/js':
         specifier: ^9.29.0
@@ -325,8 +325,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agentmail-toolkit@0.1.37:
-    resolution: {integrity: sha512-whp/11GnERPetXjWyyG3auOp9vvEV+cCWfLGjMZ9BV51MHPXY5iRZqFuJneo9Uswv8KRQYSG6eDZQLsaWcLrtw==}
+  agentmail-toolkit@0.1.39:
+    resolution: {integrity: sha512-XwkKwCqDozZvszGOnDnvl7/Ov4s2kYNSBb7MZOTZYVF9h+/bssHtKI4SIcOYgIDi/2z+sPlwfiy72Gh+zHORXA==}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.24.1
       ai: ^6.0.0-beta.150
@@ -339,8 +339,8 @@ packages:
       langchain:
         optional: true
 
-  agentmail@0.1.8:
-    resolution: {integrity: sha512-j2C7REuIeyF0YuCcHrrys3vOlhaDQ0XCZJ9xJYcQeUJNUua59LZC5I1OeVDUjrOIZE0jNQcfBggMhNicljk0yw==}
+  agentmail@0.1.11:
+    resolution: {integrity: sha512-u/3hUh54U8EqZ8aLqBZWTbEDihQn25cbUTeyzDZn1dVyzQ4Mj/lgvglXVUrTuwgCD72ryA0sszg/Fz7baUjlSg==}
     engines: {node: '>=18.0.0'}
 
   ajv-formats@3.0.1:
@@ -1456,9 +1456,9 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  agentmail-toolkit@0.1.37(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)):
+  agentmail-toolkit@0.1.39(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)):
     dependencies:
-      agentmail: 0.1.8
+      agentmail: 0.1.11
       file-type: 21.1.1
       mammoth: 1.11.0
       pdf-parse: 2.4.5
@@ -1470,7 +1470,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  agentmail@0.1.8:
+  agentmail@0.1.11:
     dependencies:
       ws: 8.18.3
     transitivePeerDependencies:
