@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/agentmail-to-agentmail-mcp-badge.png)](https://mseep.ai/app/agentmail-to-agentmail-mcp)
+
 # AgentMail MCP Server
 
 The AgentMail MCP Server provides tools for the AgentMail API.
