@@ -1,6 +1,6 @@
 {
     "name": "agentmail-mcp",
-    "version": "0.1.22",
+    "version": "0.2.0",
     "description": "AgentMail MCP Server",
     "scripts": {
         "build": "tsc && chmod 755 build/index.js",
@@ -30,8 +30,8 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.24.1",
-        "agentmail": "^0.1.11",
-        "agentmail-toolkit": "^0.1.42"
+        "agentmail": "^0.2.1",
+        "agentmail-toolkit": "^0.2.0"
     },
     "devDependencies": {
         "@eslint/js": "^9.29.0",
