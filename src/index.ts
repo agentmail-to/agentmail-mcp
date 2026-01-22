@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { AgentMailClient, AgentMailEnvironment } from 'agentmail'
+import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -20,25 +20,11 @@ const parseToolsArg = () => {
     return toolsArg.split(',').map((tool) => tool.trim())
 }
 
-const parseAgentMailEnv = () => {
-    const env = process.env.AGENTMAIL_ENVIRONMENT?.toLowerCase()
-
-    switch (env) {
-        case 'development':
-        case 'dev':
-            return AgentMailEnvironment.Development
-        case 'production':
-        case 'prod':
-        default:
-            return AgentMailEnvironment.Production
-    }
-}
-
 const main = async () => {
-    const environment = parseAgentMailEnv()
+    const baseUrl = process.env.AGENTMAIL_BASE_URL
     const toolNames = parseToolsArg()
 
-    const client = new AgentMailClient({ environment })
+    const client = new AgentMailClient({ baseUrl })
     const toolkit = new AgentMailToolkit(client)
 
     const server = new McpServer({ name: 'AgentMail', version: '0.1.0' })
