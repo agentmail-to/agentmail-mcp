@@ -1,7 +1,7 @@
 {
     "name": "agentmail-mcp",
     "version": "0.2.2",
-    "description": "AgentMail MCP Server",
+    "description": "MCP server for AI agent email — create inboxes, send, receive, reply, and manage threads via AgentMail",
     "scripts": {
         "build": "tsc && chmod 755 build/index.js",
         "lint": "eslint .",
@@ -10,8 +10,18 @@
     "keywords": [
         "agentmail",
         "mcp",
-        "server",
-        "tools"
+        "mcp-server",
+        "model-context-protocol",
+        "email",
+        "email-api",
+        "ai-agent",
+        "agent-email",
+        "inbox",
+        "claude",
+        "cursor",
+        "windsurf",
+        "ai-tools",
+        "agent-infrastructure"
     ],
     "author": "AgentMail <support@agentmail.cc>",
     "license": "MIT",
