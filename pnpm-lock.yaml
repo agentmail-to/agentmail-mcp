@@ -10,13 +10,13 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.24.1
-        version: 1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)
+        version: 1.24.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       agentmail:
         specifier: ^0.4.10
         version: 0.4.10
       agentmail-toolkit:
-        specifier: ^0.2.7
-        version: 0.2.7(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13))
+        specifier: ^0.3.1
+        version: 0.3.1(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.4.3))
     devDependencies:
       '@eslint/js':
         specifier: ^9.29.0
@@ -247,8 +247,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agentmail-toolkit@0.2.7:
-    resolution: {integrity: sha512-VxM6pBZp6OXS4rAJRCtkjFhzsomYWuMCsOF4KQl6+ee3vF8g+89ZrMLdBeADH2MTh10GvW5nUghbni8XkYz7RA==}
+  agentmail-toolkit@0.3.1:
+    resolution: {integrity: sha512-7UOld9giaZZzy6O5pyQDoFAfqc2zIkU0eFU4/uolF9T7eTmUJZTntiYuhqyFo+Fs8jqrN3KdxAP6opdHLOtVPA==}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.24.1
       ai: ^6.0.0-beta.150
@@ -965,8 +965,8 @@ packages:
   undici-types@7.8.0:
     resolution: {integrity: sha512-9UJ2xGDvQ43tYyVMpuHlsgApydB8ZKfVYTsLDhXkFL/6gfkp+U8xTGdh8pMJv1SpZna0zxG1DwsKZsreLbXBxw==}
 
-  unpdf@1.4.0:
-    resolution: {integrity: sha512-TahIk0xdH/4jh/MxfclzU79g40OyxtP00VnEUZdEkJoYtXAHWLiir6t3FC6z3vDqQTzc2ZHcla6uEiVTNjejuA==}
+  unpdf@1.6.2:
+    resolution: {integrity: sha512-zQ80ySoPuPHOsvIoRp/nJyQt8TOUoTh1+WBCGcBvlddQNgKDLRwm0AY3x8Q35I7+kIiRSgqMx+Ma2pl9McIp7A==}
     peerDependencies:
       '@napi-rs/canvas': ^0.1.69
     peerDependenciesMeta:
@@ -1027,8 +1027,8 @@ packages:
     peerDependencies:
       zod: ^3.25 || ^4
 
-  zod@4.1.13:
-    resolution: {integrity: sha512-AvvthqfqrAhNH9dnfmrfKzX5upOdjUVJYFqNSlkmGf64gRaTzlPwz99IHYnVs28qYAybvAlBV+H7pn0saFY4Ig==}
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
 snapshots:
 
@@ -1109,7 +1109,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.0
 
-  '@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)':
+  '@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)':
     dependencies:
       ajv: 8.17.1
       ajv-formats: 3.0.1(ajv@8.17.1)
@@ -1123,8 +1123,8 @@ snapshots:
       jose: 6.1.3
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.1.13
-      zod-to-json-schema: 3.25.0(zod@4.1.13)
+      zod: 4.4.3
+      zod-to-json-schema: 3.25.0(zod@4.4.3)
     optionalDependencies:
       '@cfworker/json-schema': 4.1.1
     transitivePeerDependencies:
@@ -1265,14 +1265,14 @@ snapshots:
 
   acorn@8.15.0: {}
 
-  agentmail-toolkit@0.2.7(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)):
+  agentmail-toolkit@0.3.1(@modelcontextprotocol/sdk@1.24.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
     dependencies:
       agentmail: 0.4.10
       jszip: 3.10.1
-      unpdf: 1.4.0
-      zod: 4.1.13
+      unpdf: 1.6.2
+      zod: 4.4.3
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.24.1(@cfworker/json-schema@4.1.1)(zod@4.1.13)
+      '@modelcontextprotocol/sdk': 1.24.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)
     transitivePeerDependencies:
       - '@napi-rs/canvas'
       - bufferutil
@@ -1997,7 +1997,7 @@ snapshots:
 
   undici-types@7.8.0: {}
 
-  unpdf@1.4.0: {}
+  unpdf@1.6.2: {}
 
   unpipe@1.0.0: {}
 
@@ -2025,8 +2025,8 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod-to-json-schema@3.25.0(zod@4.1.13):
+  zod-to-json-schema@3.25.0(zod@4.4.3):
     dependencies:
-      zod: 4.1.13
+      zod: 4.4.3
 
-  zod@4.1.13: {}
+  zod@4.4.3: {}
