@@ -1,9 +1,15 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs'
+
 import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+
+const packageJson = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { version: string }
 
 const parseToolsArg = () => {
     const args = process.argv.slice(2)
@@ -27,7 +33,10 @@ const main = async () => {
     const client = new AgentMailClient({ baseUrl })
     const toolkit = new AgentMailToolkit(client)
 
-    const server = new McpServer({ name: 'AgentMail', version: '0.1.0' })
+    const server = new McpServer({
+        name: 'AgentMail',
+        version: packageJson.version,
+    })
     const transport = new StdioServerTransport()
 
     for (const tool of toolkit.getTools(toolNames)) server.registerTool(tool.name, tool, tool.callback)
