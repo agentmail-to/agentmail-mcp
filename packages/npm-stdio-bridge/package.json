@@ -1,0 +1,41 @@
+{
+    "name": "agentmail-mcp",
+    "version": "1.0.0",
+    "description": "stdio compatibility bridge for the hosted AgentMail MCP server",
+    "keywords": [
+        "agentmail",
+        "mcp",
+        "stdio",
+        "bridge"
+    ],
+    "author": "AgentMail <support@agentmail.cc>",
+    "license": "MIT",
+    "homepage": "https://docs.agentmail.to/integrations/mcp",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/agentmail-to/agentmail-mcp.git",
+        "directory": "packages/npm-stdio-bridge"
+    },
+    "type": "module",
+    "files": [
+        "build"
+    ],
+    "bin": {
+        "agentmail-mcp": "build/index.js"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "scripts": {
+        "build": "tsc && chmod 755 build/index.js",
+        "prepack": "npm run build",
+        "test": "pnpm build && node --test test/*.test.mjs"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "1.29.0"
+    },
+    "devDependencies": {
+        "@types/node": "^24.13.3",
+        "typescript": "^5.9.3"
+    }
+}
