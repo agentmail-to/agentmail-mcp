@@ -1,0 +1,28 @@
+{
+  "name": "@agentmail/mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env build/index.js"
+  },
+  "dependencies": {
+    "@clerk/express": "2.1.5",
+    "@clerk/mcp-tools": "0.3.1",
+    "@modelcontextprotocol/sdk": "1.24.1",
+    "agentmail": "0.5.11",
+    "agentmail-toolkit": "0.5.0",
+    "cors": "2.8.5",
+    "express": "5.2.1",
+    "jose": "5.9.6",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "@types/cors": "2.8.17",
+    "@types/express": "5.0.6",
+    "@types/express-serve-static-core": "5.1.1",
+    "@types/node": "24.0.1",
+    "typescript": "5.8.3"
+  }
+}
