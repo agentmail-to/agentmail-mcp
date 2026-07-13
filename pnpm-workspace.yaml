@@ -1,2 +1,13 @@
 packages:
   - packages/*
+
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - agentmail
+  - agentmail-toolkit
+
+peerDependencyRules:
+  ignoreMissing:
+    - pg
+    - redis
+    - better-sqlite3

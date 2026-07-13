@@ -329,7 +329,7 @@ type AuthSource =
     | { kind: 'apiKey'; apiKey: string }
     | { kind: 'none' }
 
-function createMcpServer(auth: AuthSource): McpServer {
+export function createMcpServer(auth: AuthSource): McpServer {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
 
     // Build a placeholder client just so the toolkit can enumerate tools.
@@ -653,7 +653,7 @@ function publicUrlOverride(req: express.Request, _res: express.Response, next: e
 // Express app
 // ============================================================================
 
-const app = express()
+export const app = express()
 
 // Trust the reverse proxy in front of us (Manufact/Cloudflare/fly.io).
 // With this, Express respects X-Forwarded-Proto / X-Forwarded-Host when
@@ -713,6 +713,13 @@ const mcpHandler: express.RequestHandler = async (req, res) => {
     }
 }
 
+// Human navigation goes to the docs before authentication. MCP requests stay
+// on the same origin so credentials are never redirected across origins.
+app.get(['/', '/mcp'], (req, res, next) => {
+    if (!req.headers.accept?.includes('text/html')) return next()
+    res.redirect(302, DOCS_URL)
+})
+
 // MCP endpoints. authRouter runs first to decide OAuth vs API key.
 app.all('/mcp', authRouter, mcpHandler)
 app.all('/', authRouter, mcpHandler)
@@ -747,6 +754,7 @@ app.get('/health', (_req, res) => {
         clerk_enabled: CLERK_ENABLED,
         agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
         mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
+        build_sha: process.env.BUILD_SHA ?? 'unknown',
     })
 })
 
@@ -766,7 +774,7 @@ function maskEnvVar(name: string): string {
     return `${name}: present (len=${val.length}, prefix=${safePrefix})`
 }
 
-app.listen(PORT, () => {
+if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') app.listen(PORT, () => {
     console.log(`AgentMail MCP server running on port ${PORT}`)
     console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
     console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)

@@ -8,15 +8,15 @@
     "start": "node --env-file-if-exists=.env build/index.js"
   },
   "dependencies": {
-    "@clerk/express": "2.1.5",
-    "@clerk/mcp-tools": "0.3.1",
-    "@modelcontextprotocol/sdk": "1.24.1",
-    "agentmail": "0.5.11",
+    "@clerk/express": "2.1.40",
+    "@clerk/mcp-tools": "0.5.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "agentmail": "0.5.14",
     "agentmail-toolkit": "0.5.0",
     "cors": "2.8.5",
     "express": "5.2.1",
     "jose": "5.9.6",
-    "zod": "4.1.13"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/cors": "2.8.17",
