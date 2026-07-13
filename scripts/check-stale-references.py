@@ -12,7 +12,7 @@ from pathlib import Path
 PATTERNS = {
     r"agentmail-manufact-mcp": "former hosted-source repository",
     r"agentmail-smithery-mcp": "former Smithery-source repository",
-    r"@agentmail/mcp": "nonexistent npm package",
+    r"@agentmail/mcp(?![-\w])": "nonexistent npm package",
     r"agentmail\.run\.tools": "retired Smithery deployment",
     r"server\.smithery\.ai/agentmail": "retired Registry endpoint",
     r"\b(?:11|17)[ -]tools?\b": "copied legacy tool count",
@@ -22,6 +22,7 @@ ALLOWED = {
     "docs/migration.md",
     "docs/third-party-corrections.md",
     "migration-surfaces.yaml",
+    "scripts/audit-public-surfaces.py",
 }
 
 
