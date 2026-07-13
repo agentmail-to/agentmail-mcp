@@ -55,6 +55,8 @@ class Bridge:
             if progress_token is not None:
                 await context.session.send_progress_notification(progress_token, progress, total, message)
 
+        # ponytail: MCP 1.28.1 hides outgoing request IDs; use the released
+        # cancel_on_abandon API instead of private internals when available.
         return await self._remote().call_tool(
             name,
             arguments,
