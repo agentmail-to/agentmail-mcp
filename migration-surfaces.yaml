@@ -1,0 +1,91 @@
+surfaces:
+  - surface: canonical repository
+    owner: AgentMail MCP release owner
+    target: https://github.com/agentmail-to/agentmail-mcp
+    status: prepared
+    evidence: hosted server, bridges, generated contract, docs, and audit automation in this branch
+  - surface: production endpoint
+    owner: AgentMail infrastructure
+    target: https://mcp.agentmail.to/mcp
+    status: human_required
+    evidence: existing production project must be repointed and promoted without changing identity
+  - surface: AgentMail docs
+    owner: AgentMail documentation
+    target: https://docs.agentmail.to/integrations/mcp
+    status: prepared
+    evidence: agentmail-docs branch codex/mcp-consolidation-docs
+  - surface: AgentMail web, builders, well-known files, and llms files
+    owner: AgentMail web
+    target: https://agentmail.to
+    status: prepared
+    evidence: agentmail-web branch codex/mcp-consolidation-docs
+  - surface: AgentMail skills
+    owner: AgentMail developer relations
+    target: https://github.com/agentmail-to/agentmail-skills
+    status: prepared
+    evidence: agentmail-skills branch codex/mcp-consolidation-docs
+  - surface: AgentMail plugins
+    owner: AgentMail developer relations
+    target: https://github.com/agentmail-to/agentmail-plugins
+    status: prepared
+    evidence: agentmail-plugins branch codex/mcp-consolidation-docs
+  - surface: SDK, CLI, API, toolkit, legacy docs, onboarding, apps, and redirect repositories
+    owner: AgentMail developer platform
+    target: agentmail-node, agentmail-python, agentmail-cli, agentmail-api, agentmail-toolkit, agentmail.md, mintlify-docs, agentmail-claude-skill, onboarding, agentmail-apps, and agentmail-redirect
+    status: verified_current
+    evidence: clean default-branch clones scanned July 13, 2026; remaining agentmail-mcp strings are intentional caller analytics identifiers
+  - surface: npm agentmail-mcp
+    owner: AgentMail package release owner
+    target: https://www.npmjs.com/package/agentmail-mcp
+    status: human_required
+    evidence: publish bridge 1.0.0, verify, then deprecate old implementation versions
+  - surface: PyPI agentmail-mcp
+    owner: AgentMail package release owner
+    target: https://pypi.org/project/agentmail-mcp/
+    status: human_required
+    evidence: institutional ownership, recovery, 2FA, and trusted publishing must be verified before release
+  - surface: Smithery AgentMail listing
+    owner: AgentMail developer relations
+    target: https://smithery.ai/servers/agentmail
+    status: human_required
+    evidence: repoint to canonical external endpoint and verify one authenticated tool call
+  - surface: Official MCP Registry canonical identity
+    owner: AgentMail MCP release owner
+    target: to.agentmail/agentmail
+    status: prepared
+    evidence: server.json validates against the official remote-server schema
+  - surface: Official MCP Registry legacy Smithery identity
+    owner: AgentMail developer relations
+    target: ai.smithery/agentmail
+    status: human_required
+    evidence: active entry still points to the dead Smithery endpoint and old repository
+  - surface: former hosted-source repository
+    owner: AgentMail MCP release owner
+    target: https://github.com/agentmail-to/agentmail-manufact-mcp
+    status: prepared
+    evidence: pointer README branch prepared; publish and archive only after rollback window
+  - surface: former Smithery-source repository
+    owner: AgentMail developer relations
+    target: https://github.com/agentmail-to/agentmail-smithery-mcp
+    status: prepared
+    evidence: pointer README branch prepared; publish and archive only after Smithery verification
+  - surface: Google ADK
+    owner: AgentMail developer relations
+    target: https://adk.dev/integrations/agentmail/
+    status: third_party_request_prepared
+    evidence: docs/third-party-corrections.md
+  - surface: Hermes and downstream skill mirrors
+    owner: AgentMail developer relations
+    target: https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/email/agentmail/SKILL.md
+    status: third_party_request_prepared
+    evidence: docs/third-party-corrections.md
+  - surface: third-party MCP directories
+    owner: AgentMail developer relations
+    target: Glama, Drio, ColdIQ, Awesome Claude, AgentSkills, ClawHub, EliteAI, and discovered mirrors
+    status: third_party_request_prepared
+    evidence: docs/third-party-corrections.md
+  - surface: support macros, community pins, internal runbooks, dashboards
+    owner: AgentMail support and infrastructure
+    target: internal controlled surfaces
+    status: human_required
+    evidence: requires access to non-repository systems and manual screenshots or operational review
