@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:71c18f6cefb5a98fc7e941b8aed7e9c73dafb1854160e05317ba3f3ddfe8fd24",
+  "digest": "sha256:25908bd6aeeb5567547e34b0b336b41cff8eb68e67466e7082fedfe0d9d0cfa0",
   "tools": [
     {
       "name": "list_inboxes",
@@ -1911,7 +1911,7 @@
             }
           },
           "attachments": {
-            "description": "Attachments",
+            "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
               "type": "object",
@@ -1937,11 +1937,11 @@
                   "type": "string"
                 },
                 "content": {
-                  "description": "Base64 encoded content",
+                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
                   "type": "string"
                 },
                 "url": {
-                  "description": "URL",
+                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
                   "type": "string",
                   "format": "uri"
                 }
@@ -2043,7 +2043,7 @@
             }
           },
           "attachments": {
-            "description": "Attachments",
+            "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
               "type": "object",
@@ -2069,11 +2069,11 @@
                   "type": "string"
                 },
                 "content": {
-                  "description": "Base64 encoded content",
+                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
                   "type": "string"
                 },
                 "url": {
-                  "description": "URL",
+                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
                   "type": "string",
                   "format": "uri"
                 }
@@ -2085,25 +2085,25 @@
             "description": "ID of message"
           },
           "replyAll": {
-            "description": "Reply to all recipients",
+            "description": "Reply to all original recipients. Mutually exclusive with to, cc, and bcc — the API rejects the request if both are set",
             "type": "boolean"
           },
           "to": {
-            "description": "Override reply recipients",
+            "description": "Override reply recipients, replacing the default (the original sender). Omit to reply to the sender only. Cannot be combined with replyAll",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "cc": {
-            "description": "Override CC recipients",
+            "description": "Override CC recipients. Cannot be combined with replyAll",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "bcc": {
-            "description": "Override BCC recipients",
+            "description": "Override BCC recipients. Cannot be combined with replyAll",
             "type": "array",
             "items": {
               "type": "string"
@@ -2179,7 +2179,7 @@
             }
           },
           "attachments": {
-            "description": "Attachments",
+            "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
               "type": "object",
@@ -2205,11 +2205,11 @@
                   "type": "string"
                 },
                 "content": {
-                  "description": "Base64 encoded content",
+                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
                   "type": "string"
                 },
                 "url": {
-                  "description": "URL",
+                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
                   "type": "string",
                   "format": "uri"
                 }
@@ -2384,7 +2384,7 @@
             }
           },
           "attachments": {
-            "description": "Attachments",
+            "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
               "type": "object",
@@ -2410,11 +2410,11 @@
                   "type": "string"
                 },
                 "content": {
-                  "description": "Base64 encoded content",
+                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
                   "type": "string"
                 },
                 "url": {
-                  "description": "URL",
+                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
                   "type": "string",
                   "format": "uri"
                 }
