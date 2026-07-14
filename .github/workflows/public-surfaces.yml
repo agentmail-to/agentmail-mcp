@@ -1,0 +1,21 @@
+name: Public surfaces
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 15 * * 1"
+
+jobs:
+  stale-references:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/check-stale-references.py --self-test
+      - run: python scripts/check-stale-references.py
+      - run: python scripts/audit-public-surfaces.py --self-test
+      - run: python scripts/audit-public-surfaces.py

@@ -1,57 +1,51 @@
-# AgentMail MCP Server
+# AgentMail MCP
 
-> **Deprecated:** AgentMail now runs a hosted MCP server at [`https://mcp.agentmail.to/mcp`](https://mcp.agentmail.to/mcp) (see [docs](https://docs.agentmail.to/integrations/mcp)). This local stdio package is no longer maintained. New integrations should use the hosted endpoint:
->
-> ```json
-> {
->     "mcpServers": {
->         "AgentMail": {
->             "url": "https://mcp.agentmail.to/mcp?apiKey=YOUR_API_KEY"
->         }
->     }
-> }
-> ```
+AgentMail has one MCP tool implementation, hosted at:
 
-The AgentMail MCP Server provides tools for the AgentMail API.
+```text
+https://mcp.agentmail.to/mcp
+```
 
-## Legacy (local stdio) setup
+Use that Streamable HTTP endpoint directly when your client supports remote MCP. It provides the current runtime tool catalog and supports the hosted server's existing OAuth and per-request API-key paths. See the [AgentMail MCP documentation](https://docs.agentmail.to/integrations/mcp).
 
-### Credentials
+## stdio compatibility
 
-Get your API key from [AgentMail](https://agentmail.to)
-
-### Configuration
+Existing Node configurations continue to work through the npm bridge:
 
 ```json
 {
-    "mcpServers": {
-        "AgentMail": {
-            "command": "npx",
-            "args": ["-y", "agentmail-mcp"],
-            "env": {
-                "AGENTMAIL_API_KEY": "YOUR_API_KEY"
-            }
-        }
+  "mcpServers": {
+    "AgentMail": {
+      "command": "npx",
+      "args": ["-y", "agentmail-mcp"],
+      "env": { "AGENTMAIL_API_KEY": "YOUR_API_KEY" }
     }
+  }
 }
 ```
 
-### Tool Selection
+Python users can run the equivalent native bridge:
 
-By default, all available tools are loaded. You can selectively enable specific tools using the `--tools` argument with a comma-separated list of tool names.
-
-#### Example
-
-```json
-{
-    "mcpServers": {
-        "AgentMail": {
-            "command": "npx",
-            "args": ["-y", "agentmail-mcp", "--tools", "get_message,send_message,reply_to_message"],
-            "env": {
-                "AGENTMAIL_API_KEY": "YOUR_API_KEY"
-            }
-        }
-    }
-}
+```sh
+AGENTMAIL_API_KEY=YOUR_API_KEY uvx agentmail-mcp
 ```
+
+Both bridges discover tools and schemas from the hosted server. They do not contain AgentMail SDK, toolkit, REST API, or tool-definition logic. `--tools name1,name2` remains available for stdio clients that need a filtered catalog.
+
+## Repository
+
+- `packages/server`: the hosted MCP server and only AgentMail tool implementation
+- `packages/npm-stdio-bridge`: npm `agentmail-mcp`
+- `python/stdio-bridge`: PyPI `agentmail-mcp`
+- `mcp-manifest.json`: generated runtime contract
+- `tests`: contract and transport checks
+- `docs`: architecture, compatibility, migration, release, and operations
+
+```sh
+pnpm install
+pnpm build
+pnpm test
+pnpm check:contract
+```
+
+The old local npm implementation is preserved at `legacy-local-v0.2.2`. Authentication hardening is a separate project; this consolidation preserves the hosted server's existing behavior.

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentmail-mcp"
+version = "1.0.0"
+description = "Stdio compatibility bridge for the hosted AgentMail MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "AgentMail", email = "support@agentmail.to" }]
+dependencies = [
+  "httpx==0.28.1",
+  "mcp==1.28.1",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.urls]
+Documentation = "https://docs.agentmail.to/integrations/mcp"
+Issues = "https://github.com/agentmail-to/agentmail-mcp/issues"
+Source = "https://github.com/agentmail-to/agentmail-mcp"
+
+[project.scripts]
+agentmail-mcp = "agentmail_mcp.bridge:main"
+
+[dependency-groups]
+dev = ["build==1.5.1", "pytest==9.1.1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentmail_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

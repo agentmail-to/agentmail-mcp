@@ -1,47 +1,17 @@
 {
-    "name": "agentmail-mcp",
-    "version": "0.3.0",
-    "description": "AgentMail MCP Server",
-    "scripts": {
-        "build": "tsc && chmod 755 build/index.js",
-        "lint": "eslint .",
-        "prettier": "prettier --write ."
-    },
-    "keywords": [
-        "agentmail",
-        "mcp",
-        "server",
-        "tools"
-    ],
-    "author": "AgentMail <support@agentmail.cc>",
-    "license": "MIT",
-    "homepage": "https://agentmail.to",
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/agentmail-to/agentmail-mcp.git"
-    },
+    "name": "agentmail-mcp-monorepo",
+    "private": true,
     "packageManager": "pnpm@10.6.4",
-    "type": "module",
-    "files": [
-        "build"
-    ],
-    "bin": {
-        "agentmail-mcp": "build/index.js"
-    },
-    "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.24.1",
-        "agentmail": "^0.5.11",
-        "agentmail-toolkit": "^0.4.0"
+    "scripts": {
+        "build": "pnpm -r --if-present build",
+        "start": "pnpm --filter @agentmail/mcp-server start",
+        "generate:manifest": "pnpm --filter @agentmail/mcp-server build && node scripts/generate-manifest.mjs",
+        "check:bridges": "node scripts/check-bridge-boundaries.mjs",
+        "check:contract": "node scripts/check-contract.mjs",
+        "test:python": "uv run --no-project --with ./python/stdio-bridge --with pytest pytest -q python/stdio-bridge/tests",
+        "test": "pnpm --filter agentmail-mcp test && pnpm generate:manifest && node --test tests/*.test.mjs && pnpm test:python && pnpm check:bridges"
     },
     "devDependencies": {
-        "@eslint/js": "^9.29.0",
-        "@types/node": "^24.0.1",
-        "eslint": "^9.29.0",
-        "eslint-config-prettier": "^10.1.5",
-        "globals": "^16.2.0",
-        "prettier": "3.5.3",
-        "ts-node": "^10.9.2",
-        "typescript": "^5.8.3",
-        "typescript-eslint": "^8.34.0"
+        "@modelcontextprotocol/sdk": "1.29.0"
     }
 }
