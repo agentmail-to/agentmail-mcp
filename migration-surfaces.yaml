@@ -2,8 +2,8 @@ surfaces:
   - surface: canonical repository
     owner: AgentMail MCP release owner
     target: https://github.com/agentmail-to/agentmail-mcp
-    status: prepared
-    evidence: hosted server, bridges, generated contract, docs, and audit automation in this branch
+    status: verified_current
+    evidence: PR 20 merged to main with hosted server, bridges, generated contract, docs, and audit automation
   - surface: production endpoint
     owner: AgentMail infrastructure
     target: https://mcp.agentmail.to/mcp
@@ -38,12 +38,12 @@ surfaces:
     owner: AgentMail package release owner
     target: https://www.npmjs.com/package/agentmail-mcp
     status: human_required
-    evidence: publish bridge 1.0.0, verify, then deprecate old implementation versions
+    evidence: sanjith_sambath ownership and auth-and-writes 2FA verified; trusted-publishing workflow prepared; production verification and external publisher setup remain before release
   - surface: PyPI agentmail-mcp
     owner: AgentMail package release owner
     target: https://pypi.org/project/agentmail-mcp/
     status: human_required
-    evidence: institutional ownership, recovery, 2FA, and trusted publishing must be verified before release
+    evidence: trusted-publishing workflow prepared; institutional ownership, recovery, 2FA, and external publisher setup must be verified before release
   - surface: Smithery AgentMail listing
     owner: AgentMail developer relations
     target: https://smithery.ai/servers/agentmail

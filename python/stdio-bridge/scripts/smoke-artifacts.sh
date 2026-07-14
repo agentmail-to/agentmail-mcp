@@ -4,10 +4,12 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+dist=${1:-"$tmp/dist"}
 
 cd "$root"
-python -m build --outdir "$tmp/dist"
-for artifact in "$tmp"/dist/*; do
+mkdir -p "$dist"
+python -m build --outdir "$dist"
+for artifact in "$dist"/*; do
     python -m venv "$tmp/venv"
     "$tmp/venv/bin/python" -m pip install -q "$artifact"
     "$tmp/venv/bin/python" -m pip check

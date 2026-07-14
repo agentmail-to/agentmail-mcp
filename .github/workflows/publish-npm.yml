@@ -1,0 +1,48 @@
+name: Publish npm bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version from packages/npm-stdio-bridge/package.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - name: Require main
+        run: test "$GITHUB_REF" = refs/heads/main
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.18.0
+      - run: pnpm install --frozen-lockfile
+      - name: Verify release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: test "$(node -p "require('./packages/npm-stdio-bridge/package.json').version")" = "$RELEASE_VERSION"
+      - run: pnpm --filter agentmail-mcp test
+      - run: pnpm check:bridges
+      - name: Inspect package artifact
+        working-directory: packages/npm-stdio-bridge
+        run: npm publish --dry-run --access public
+      - name: Publish package
+        working-directory: packages/npm-stdio-bridge
+        run: npm publish --access public
