@@ -40,8 +40,8 @@ importers:
         specifier: 0.5.14
         version: 0.5.14
       agentmail-toolkit:
-        specifier: 0.5.0
-        version: 0.5.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
+        specifier: 0.5.1
+        version: 0.5.1(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
       cors:
         specifier: 2.8.5
         version: 2.8.5
@@ -174,8 +174,8 @@ packages:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
 
-  agentmail-toolkit@0.5.0:
-    resolution: {integrity: sha512-IHmYfL+mQPCia8pN/td7cNLJq+GnUDXHr0TvR1lbea5oYPGa8RknKp3a7O7o0M3LZQKKTSSEr07e0hrn/oNDBg==}
+  agentmail-toolkit@0.5.1:
+    resolution: {integrity: sha512-BHyDtgmXI8UnZDPsWICM3/SvBVZ0J+zxWWOTeUT+YP5d0bD98vXy7kaU2960ER11u9TfneqWpdbx88jzbd/M0g==}
     peerDependencies:
       '@mariozechner/pi-agent-core': ^0.50.1
       '@modelcontextprotocol/sdk': ^1.24.1
@@ -768,7 +768,7 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  agentmail-toolkit@0.5.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
+  agentmail-toolkit@0.5.1(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
     dependencies:
       agentmail: 0.5.14
       jszip: 3.10.1
