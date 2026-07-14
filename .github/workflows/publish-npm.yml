@@ -19,7 +19,6 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: npm
     steps:
       - name: Require main
         run: test "$GITHUB_REF" = refs/heads/main
