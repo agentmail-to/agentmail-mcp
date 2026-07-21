@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -15,10 +16,10 @@ import {
     type Progress,
 } from '@modelcontextprotocol/sdk/types.js'
 
-const VERSION = '1.0.0'
+const VERSION = '1.0.1'
 const ENDPOINT = new URL('https://mcp.agentmail.to/mcp')
-const BRIDGE_HEADER = 'node/1.0.0'
-const USER_AGENT = 'agentmail-mcp-node/1.0.0'
+const BRIDGE_HEADER = 'node/1.0.1'
+const USER_AGENT = 'agentmail-mcp-node/1.0.1'
 
 export function parseTools(args: string[]) {
     const index = args.indexOf('--tools')
@@ -99,7 +100,8 @@ async function main() {
     await startBridge(remote, new StdioServerTransport(), parseTools(process.argv.slice(2)))
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+const entryUrl = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href
+if (entryUrl && import.meta.url === entryUrl) {
     main().catch((error) => {
         const message = error instanceof Error ? error.message : ''
         console.error(
