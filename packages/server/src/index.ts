@@ -329,13 +329,18 @@ type AuthSource =
     | { kind: 'apiKey'; apiKey: string }
     | { kind: 'none' }
 
+// Tool definitions are static metadata (name/description/schemas) — identical
+// for every request — so enumerate them once at module load. Previously each
+// incoming request built its own placeholder AgentMailClient + AgentMailToolkit
+// just to enumerate tools, and long-lived SSE connections retained that whole
+// per-request graph until close, which amplified the 2026-07-21 reconnect-storm
+// heap exhaustion. The real, per-auth client is still built inside the tool
+// callback at invocation time.
+const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeholder' }))
+const STATIC_TOOLS = staticToolkit.getTools()
+
 export function createMcpServer(auth: AuthSource): McpServer {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
-
-    // Build a placeholder client just so the toolkit can enumerate tools.
-    // We swap in a real client per tool call below.
-    const placeholderClient = new AgentMailClient({ apiKey: 'placeholder' })
-    const toolkit = new AgentMailToolkit(placeholderClient)
 
     const noAuthMessage = {
         content: [
@@ -349,7 +354,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
         ],
     }
 
-    for (const tool of toolkit.getTools()) {
+    for (const tool of STATIC_TOOLS) {
         server.registerTool(tool.name, tool, async (args, extra) => {
             try {
                 let client: AgentMailClient
@@ -572,6 +577,19 @@ function extractApiKey(req: express.Request): string | undefined {
     return fromQuery || fromHeader || fromBearer || fromEnv
 }
 
+/**
+ * 401 challenge identical in shape to the one @clerk/mcp-tools sends for a
+ * missing Authorization header (status, WWW-Authenticate resource_metadata
+ * pointer, body), so OAuth clients re-enter the discovery flow the same way
+ * in both cases. URL composition mirrors getPRMUrl in @clerk/mcp-tools.
+ */
+function sendOAuthChallenge(req: express.Request, res: express.Response) {
+    const prmUrl = `${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource${req.originalUrl}`
+    res.status(401)
+        .set({ 'WWW-Authenticate': `Bearer resource_metadata=${prmUrl}` })
+        .json({ error: 'Unauthorized' })
+}
+
 const authRouter: express.RequestHandler = async (req, res, next) => {
     const apiKey = extractApiKey(req)
     if (apiKey) {
@@ -581,38 +599,73 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
 
     // No API key. If Clerk is configured, hand off to mcpAuthClerk for OAuth.
     if (CLERK_ENABLED) {
-        return mcpAuthClerk(req, res, (err) => {
-            if (err) return next(err)
-            // mcpAuthClerk (from @clerk/mcp-tools) validates the Bearer token
-            // as a Clerk OAuth access token and, on success, writes an MCP SDK
-            // AuthInfo object directly to req.auth, OVERWRITING the function
-            // set earlier by clerkMiddleware. The AuthInfo shape is:
-            //   { token, scopes, clientId, extra: { userId } }
-            // (see verifyClerkToken in @clerk/mcp-tools/dist/chunk-H4BXCCRK.js)
-            //
-            // IMPORTANT: do NOT use getAuth(req) from @clerk/express here —
-            // that helper calls req.auth(options) expecting a session-token
-            // getter function, but mcpAuthClerk has replaced req.auth with a
-            // plain object, so getAuth() throws "TypeError: req.auth is not
-            // a function". Read the userId directly from req.auth.extra.
-            const authInfo = (
-                req as unknown as { auth?: { token?: string; extra?: { userId?: string } } }
-            ).auth
-            const userId = authInfo?.extra?.userId
-            // Clerk's user:org:read scope puts the user's selected org in the
-            // access token's `org_id` claim. The @clerk/mcp-tools wrapper
-            // doesn't surface it, so we decode the raw token. Falls back to
-            // undefined if the claim is missing — see buildClientFromClerkUser
-            // for how that case is handled (single-org auto-pick vs multi-org
-            // strict reject).
-            const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
-            if (userId) {
-                req.authSource = { kind: 'clerk', clerkUserId: userId, clerkOrgId }
-            } else {
-                req.authSource = { kind: 'none' }
-            }
-            next()
-        })
+        // Reject malformed Authorization headers BEFORE mcpAuthClerk sees them.
+        // Its inner mcpAuth middleware throws ("Invalid authorization header
+        // value, expected Bearer <token>") when the header carries no token
+        // after the scheme — e.g. a bare "Authorization: Bearer". Crucially,
+        // mcpAuthClerk invokes that middleware as `(await mcpAuth(...))(req,
+        // res, next)` WITHOUT awaiting the resulting promise, so the rejection
+        // is detached from the chain Express 5 tracks: no try/catch or error
+        // middleware can reach it, it surfaces as a process-level unhandled
+        // rejection, and Node exits with code 1. That crash-looped production
+        // three times on 2026-07-19 (10:03/10:13/10:14 UTC). The guard mirrors
+        // mcpAuth's own parse (`header.split(' ')[1]` empty) so we 401 exactly
+        // the requests that would otherwise kill the process.
+        const authHeader = req.headers.authorization
+        if (authHeader && !authHeader.split(' ')[1]) {
+            // Don't log the header value: a token joined by non-space
+            // whitespace would land here and must not reach the logs.
+            console.warn('[auth] malformed Authorization header (no token after scheme), returning 401')
+            return sendOAuthChallenge(req, res)
+        }
+
+        try {
+            return await mcpAuthClerk(req, res, (err) => {
+                if (err) {
+                    // A failure inside the auth middleware is an auth failure:
+                    // challenge the client instead of bubbling a 500.
+                    console.error('[auth] mcpAuthClerk error:', err)
+                    if (!res.headersSent) sendOAuthChallenge(req, res)
+                    return
+                }
+                // mcpAuthClerk (from @clerk/mcp-tools) validates the Bearer token
+                // as a Clerk OAuth access token and, on success, writes an MCP SDK
+                // AuthInfo object directly to req.auth, OVERWRITING the function
+                // set earlier by clerkMiddleware. The AuthInfo shape is:
+                //   { token, scopes, clientId, extra: { userId } }
+                // (see verifyClerkToken in @clerk/mcp-tools/dist/chunk-H4BXCCRK.js)
+                //
+                // IMPORTANT: do NOT use getAuth(req) from @clerk/express here —
+                // that helper calls req.auth(options) expecting a session-token
+                // getter function, but mcpAuthClerk has replaced req.auth with a
+                // plain object, so getAuth() throws "TypeError: req.auth is not
+                // a function". Read the userId directly from req.auth.extra.
+                const authInfo = (
+                    req as unknown as { auth?: { token?: string; extra?: { userId?: string } } }
+                ).auth
+                const userId = authInfo?.extra?.userId
+                // Clerk's user:org:read scope puts the user's selected org in the
+                // access token's `org_id` claim. The @clerk/mcp-tools wrapper
+                // doesn't surface it, so we decode the raw token. Falls back to
+                // undefined if the claim is missing — see buildClientFromClerkUser
+                // for how that case is handled (single-org auto-pick vs multi-org
+                // strict reject).
+                const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
+                if (userId) {
+                    req.authSource = { kind: 'clerk', clerkUserId: userId, clerkOrgId }
+                } else {
+                    req.authSource = { kind: 'none' }
+                }
+                next()
+            })
+        } catch (error) {
+            // Errors thrown on the awaited part of mcpAuthClerk (rare; the
+            // detached-rejection path is handled by the guard above). Same
+            // policy: auth-layer failure → 401 challenge, never a crash.
+            console.error('[auth] mcpAuthClerk threw:', error)
+            if (!res.headersSent) sendOAuthChallenge(req, res)
+            return
+        }
     }
 
     // No API key, no Clerk. Tools will return the noAuthMessage when called.
@@ -773,6 +826,18 @@ function maskEnvVar(name: string): string {
     const safePrefix = /^(pk_|sk_|am_)/.test(firstChars) ? firstChars : '***'
     return `${name}: present (len=${val.length}, prefix=${safePrefix})`
 }
+
+// Last-resort containment. Node's default for an unhandled promise rejection
+// is to exit(1), which takes down every live SSE connection on the box and
+// triggers a client reconnect storm against the replacement process. The known
+// producer (bare-Bearer throw detached inside @clerk/mcp-tools — see
+// authRouter) is guarded above, but any future detached rejection should be
+// logged loudly and survived, not turn into a crash loop. The request that
+// caused it gets no response and times out client-side; that is strictly
+// better than dropping everyone.
+process.on('unhandledRejection', (reason) => {
+    console.error('[fatal-contained] unhandled promise rejection:', reason)
+})
 
 if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') app.listen(PORT, () => {
     console.log(`AgentMail MCP server running on port ${PORT}`)
