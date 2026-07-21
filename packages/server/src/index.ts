@@ -35,6 +35,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
+import v8 from 'node:v8'
 import { z } from 'zod'
 
 // ============================================================================
@@ -739,14 +740,39 @@ app.get('/.well-known/openai-apps-challenge', (_req, res) => {
     res.type('text/plain').send(OPENAI_APPS_CHALLENGE_TOKEN)
 })
 
+// Reject non-POST MCP methods before auth and before any per-request
+// allocation. This server is stateless (sessionIdGenerator: undefined) and
+// never initiates messages, so a standalone GET SSE stream can never carry an
+// event — yet the SDK transport accepts the GET and holds the stream open
+// indefinitely, pinning the whole per-request graph (a fresh McpServer with
+// every registered tool, the transport, req/res) until the client goes away.
+// That is what turned the 2026-07-21 reconnect storm (~962 SSE connects in
+// 54s, 326 in one 5s window) into heap exhaustion at the ~495 MB V8 limit.
+//
+// The Streamable HTTP spec explicitly allows a server that offers no SSE
+// stream to answer GET with 405 Method Not Allowed; clients then proceed
+// without a notification stream, which for this server changes nothing.
+// DELETE (session termination) is likewise meaningless with no sessions.
+// Mounted before authRouter so a storm of GETs is shed without spending a
+// Clerk token verification on each one; body shape matches the SDK's own
+// 405 (jsonrpc error -32000).
+const statelessMethodGuard: express.RequestHandler = (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'DELETE') return next()
+    res.status(405)
+        .set('Allow', 'POST')
+        .json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Method Not Allowed: stateless server, POST only' },
+            id: null,
+        })
+}
+
 // MCP request handler. We don't use streamableHttpHandler here because it
 // pre-binds an MCP server; we want to construct ours per-request based on
-// the resolved auth source.
+// the resolved auth source. Only POST reaches this handler: text/html GETs
+// are redirected to the docs above, all other GETs and DELETEs get a 405
+// from statelessMethodGuard.
 const mcpHandler: express.RequestHandler = async (req, res) => {
-    if (req.method === 'GET' && req.headers.accept?.includes('text/html')) {
-        return res.redirect(302, DOCS_URL)
-    }
-
     try {
         const authSource = req.authSource ?? { kind: 'none' }
         const server = createMcpServer(authSource)
@@ -773,9 +799,10 @@ app.get(['/', '/mcp'], (req, res, next) => {
     res.redirect(302, DOCS_URL)
 })
 
-// MCP endpoints. authRouter runs first to decide OAuth vs API key.
-app.all('/mcp', authRouter, mcpHandler)
-app.all('/', authRouter, mcpHandler)
+// MCP endpoints. statelessMethodGuard sheds GET/DELETE, then authRouter
+// decides OAuth vs API key for the POSTs that remain.
+app.all('/mcp', statelessMethodGuard, authRouter, mcpHandler)
+app.all('/', statelessMethodGuard, authRouter, mcpHandler)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
@@ -802,14 +829,73 @@ if (CLERK_ENABLED) {
 }
 
 app.get('/health', (_req, res) => {
+    const { heapUsed, rss } = process.memoryUsage()
     res.json({
         status: 'ok',
         clerk_enabled: CLERK_ENABLED,
         agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
         mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
         build_sha: process.env.BUILD_SHA ?? 'unknown',
+        heap: {
+            used_mb: Math.round(heapUsed / MB),
+            limit_mb: Math.round(HEAP_LIMIT_BYTES / MB),
+            rss_mb: Math.round(rss / MB),
+        },
     })
 })
+
+// ============================================================================
+// Heap pressure telemetry
+//
+// The 2026-07-21 crash aborted at ~467 MB retained after full GC against a
+// ~495 MB V8 heap limit, with no warning beforehand. This monitor gives the
+// gateway logs a leading indicator and (opt-in) a heap snapshot captured
+// while there is still headroom to analyze it.
+//
+//   - Every 30s, if heap used exceeds AGENTMAIL_HEAP_WARN_MB (default 350,
+//     capped at 75% of the actual V8 limit so small dev heaps still warn
+//     before dying), log used/limit/rss.
+//   - If AGENTMAIL_HEAP_SNAPSHOT=1, additionally write ONE heap snapshot per
+//     process lifetime the first time the threshold is crossed. Opt-in and
+//     one-shot because v8.writeHeapSnapshot blocks the event loop and
+//     temporarily needs about as much memory as the heap it captures — the
+//     threshold sits well below the limit precisely so the capture can
+//     succeed. The .heapsnapshot lands in the working directory (or
+//     AGENTMAIL_HEAP_SNAPSHOT_DIR) for Chrome DevTools.
+//
+// unref() so the timer never keeps a test process (or a draining worker)
+// alive.
+// ============================================================================
+
+const MB = 1024 * 1024
+const HEAP_LIMIT_BYTES = v8.getHeapStatistics().heap_size_limit
+const HEAP_WARN_BYTES = Math.min(
+    (parseInt(process.env.AGENTMAIL_HEAP_WARN_MB || '', 10) || 350) * MB,
+    HEAP_LIMIT_BYTES * 0.75
+)
+let heapSnapshotWritten = false
+
+setInterval(() => {
+    const { heapUsed, rss } = process.memoryUsage()
+    if (heapUsed < HEAP_WARN_BYTES) return
+    console.warn(
+        `[heap] pressure: used ${Math.round(heapUsed / MB)} MB of ${Math.round(
+            HEAP_LIMIT_BYTES / MB
+        )} MB limit (rss ${Math.round(rss / MB)} MB, warn threshold ${Math.round(HEAP_WARN_BYTES / MB)} MB)`
+    )
+    if (!heapSnapshotWritten && process.env.AGENTMAIL_HEAP_SNAPSHOT === '1') {
+        heapSnapshotWritten = true
+        try {
+            const dir = process.env.AGENTMAIL_HEAP_SNAPSHOT_DIR
+            const file = v8.writeHeapSnapshot(
+                dir ? `${dir.replace(/\/$/, '')}/agentmail-mcp-${Date.now()}.heapsnapshot` : undefined
+            )
+            console.warn(`[heap] snapshot written to ${file}`)
+        } catch (error) {
+            console.error('[heap] snapshot failed:', error)
+        }
+    }
+}, 30_000).unref()
 
 // ============================================================================
 // Env var diagnostic (prints on boot to help debug Manufact injection issues).
