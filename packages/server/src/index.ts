@@ -35,6 +35,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
+import v8 from 'node:v8'
 import { z } from 'zod'
 
 // ============================================================================
@@ -329,13 +330,18 @@ type AuthSource =
     | { kind: 'apiKey'; apiKey: string }
     | { kind: 'none' }
 
+// Tool definitions are static metadata (name/description/schemas) — identical
+// for every request — so enumerate them once at module load. Previously each
+// incoming request built its own placeholder AgentMailClient + AgentMailToolkit
+// just to enumerate tools, and long-lived SSE connections retained that whole
+// per-request graph until close, which amplified the 2026-07-21 reconnect-storm
+// heap exhaustion. The real, per-auth client is still built inside the tool
+// callback at invocation time.
+const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeholder' }))
+const STATIC_TOOLS = staticToolkit.getTools()
+
 export function createMcpServer(auth: AuthSource): McpServer {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
-
-    // Build a placeholder client just so the toolkit can enumerate tools.
-    // We swap in a real client per tool call below.
-    const placeholderClient = new AgentMailClient({ apiKey: 'placeholder' })
-    const toolkit = new AgentMailToolkit(placeholderClient)
 
     const noAuthMessage = {
         content: [
@@ -349,7 +355,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
         ],
     }
 
-    for (const tool of toolkit.getTools()) {
+    for (const tool of STATIC_TOOLS) {
         server.registerTool(tool.name, tool, async (args, extra) => {
             try {
                 let client: AgentMailClient
@@ -572,6 +578,19 @@ function extractApiKey(req: express.Request): string | undefined {
     return fromQuery || fromHeader || fromBearer || fromEnv
 }
 
+/**
+ * 401 challenge identical in shape to the one @clerk/mcp-tools sends for a
+ * missing Authorization header (status, WWW-Authenticate resource_metadata
+ * pointer, body), so OAuth clients re-enter the discovery flow the same way
+ * in both cases. URL composition mirrors getPRMUrl in @clerk/mcp-tools.
+ */
+function sendOAuthChallenge(req: express.Request, res: express.Response) {
+    const prmUrl = `${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource${req.originalUrl}`
+    res.status(401)
+        .set({ 'WWW-Authenticate': `Bearer resource_metadata=${prmUrl}` })
+        .json({ error: 'Unauthorized' })
+}
+
 const authRouter: express.RequestHandler = async (req, res, next) => {
     const apiKey = extractApiKey(req)
     if (apiKey) {
@@ -581,38 +600,73 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
 
     // No API key. If Clerk is configured, hand off to mcpAuthClerk for OAuth.
     if (CLERK_ENABLED) {
-        return mcpAuthClerk(req, res, (err) => {
-            if (err) return next(err)
-            // mcpAuthClerk (from @clerk/mcp-tools) validates the Bearer token
-            // as a Clerk OAuth access token and, on success, writes an MCP SDK
-            // AuthInfo object directly to req.auth, OVERWRITING the function
-            // set earlier by clerkMiddleware. The AuthInfo shape is:
-            //   { token, scopes, clientId, extra: { userId } }
-            // (see verifyClerkToken in @clerk/mcp-tools/dist/chunk-H4BXCCRK.js)
-            //
-            // IMPORTANT: do NOT use getAuth(req) from @clerk/express here —
-            // that helper calls req.auth(options) expecting a session-token
-            // getter function, but mcpAuthClerk has replaced req.auth with a
-            // plain object, so getAuth() throws "TypeError: req.auth is not
-            // a function". Read the userId directly from req.auth.extra.
-            const authInfo = (
-                req as unknown as { auth?: { token?: string; extra?: { userId?: string } } }
-            ).auth
-            const userId = authInfo?.extra?.userId
-            // Clerk's user:org:read scope puts the user's selected org in the
-            // access token's `org_id` claim. The @clerk/mcp-tools wrapper
-            // doesn't surface it, so we decode the raw token. Falls back to
-            // undefined if the claim is missing — see buildClientFromClerkUser
-            // for how that case is handled (single-org auto-pick vs multi-org
-            // strict reject).
-            const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
-            if (userId) {
-                req.authSource = { kind: 'clerk', clerkUserId: userId, clerkOrgId }
-            } else {
-                req.authSource = { kind: 'none' }
-            }
-            next()
-        })
+        // Reject malformed Authorization headers BEFORE mcpAuthClerk sees them.
+        // Its inner mcpAuth middleware throws ("Invalid authorization header
+        // value, expected Bearer <token>") when the header carries no token
+        // after the scheme — e.g. a bare "Authorization: Bearer". Crucially,
+        // mcpAuthClerk invokes that middleware as `(await mcpAuth(...))(req,
+        // res, next)` WITHOUT awaiting the resulting promise, so the rejection
+        // is detached from the chain Express 5 tracks: no try/catch or error
+        // middleware can reach it, it surfaces as a process-level unhandled
+        // rejection, and Node exits with code 1. That crash-looped production
+        // three times on 2026-07-19 (10:03/10:13/10:14 UTC). The guard mirrors
+        // mcpAuth's own parse (`header.split(' ')[1]` empty) so we 401 exactly
+        // the requests that would otherwise kill the process.
+        const authHeader = req.headers.authorization
+        if (authHeader && !authHeader.split(' ')[1]) {
+            // Don't log the header value: a token joined by non-space
+            // whitespace would land here and must not reach the logs.
+            console.warn('[auth] malformed Authorization header (no token after scheme), returning 401')
+            return sendOAuthChallenge(req, res)
+        }
+
+        try {
+            return await mcpAuthClerk(req, res, (err) => {
+                if (err) {
+                    // A failure inside the auth middleware is an auth failure:
+                    // challenge the client instead of bubbling a 500.
+                    console.error('[auth] mcpAuthClerk error:', err)
+                    if (!res.headersSent) sendOAuthChallenge(req, res)
+                    return
+                }
+                // mcpAuthClerk (from @clerk/mcp-tools) validates the Bearer token
+                // as a Clerk OAuth access token and, on success, writes an MCP SDK
+                // AuthInfo object directly to req.auth, OVERWRITING the function
+                // set earlier by clerkMiddleware. The AuthInfo shape is:
+                //   { token, scopes, clientId, extra: { userId } }
+                // (see verifyClerkToken in @clerk/mcp-tools/dist/chunk-H4BXCCRK.js)
+                //
+                // IMPORTANT: do NOT use getAuth(req) from @clerk/express here —
+                // that helper calls req.auth(options) expecting a session-token
+                // getter function, but mcpAuthClerk has replaced req.auth with a
+                // plain object, so getAuth() throws "TypeError: req.auth is not
+                // a function". Read the userId directly from req.auth.extra.
+                const authInfo = (
+                    req as unknown as { auth?: { token?: string; extra?: { userId?: string } } }
+                ).auth
+                const userId = authInfo?.extra?.userId
+                // Clerk's user:org:read scope puts the user's selected org in the
+                // access token's `org_id` claim. The @clerk/mcp-tools wrapper
+                // doesn't surface it, so we decode the raw token. Falls back to
+                // undefined if the claim is missing — see buildClientFromClerkUser
+                // for how that case is handled (single-org auto-pick vs multi-org
+                // strict reject).
+                const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
+                if (userId) {
+                    req.authSource = { kind: 'clerk', clerkUserId: userId, clerkOrgId }
+                } else {
+                    req.authSource = { kind: 'none' }
+                }
+                next()
+            })
+        } catch (error) {
+            // Errors thrown on the awaited part of mcpAuthClerk (rare; the
+            // detached-rejection path is handled by the guard above). Same
+            // policy: auth-layer failure → 401 challenge, never a crash.
+            console.error('[auth] mcpAuthClerk threw:', error)
+            if (!res.headersSent) sendOAuthChallenge(req, res)
+            return
+        }
     }
 
     // No API key, no Clerk. Tools will return the noAuthMessage when called.
@@ -686,14 +740,39 @@ app.get('/.well-known/openai-apps-challenge', (_req, res) => {
     res.type('text/plain').send(OPENAI_APPS_CHALLENGE_TOKEN)
 })
 
+// Reject non-POST MCP methods before auth and before any per-request
+// allocation. This server is stateless (sessionIdGenerator: undefined) and
+// never initiates messages, so a standalone GET SSE stream can never carry an
+// event — yet the SDK transport accepts the GET and holds the stream open
+// indefinitely, pinning the whole per-request graph (a fresh McpServer with
+// every registered tool, the transport, req/res) until the client goes away.
+// That is what turned the 2026-07-21 reconnect storm (~962 SSE connects in
+// 54s, 326 in one 5s window) into heap exhaustion at the ~495 MB V8 limit.
+//
+// The Streamable HTTP spec explicitly allows a server that offers no SSE
+// stream to answer GET with 405 Method Not Allowed; clients then proceed
+// without a notification stream, which for this server changes nothing.
+// DELETE (session termination) is likewise meaningless with no sessions.
+// Mounted before authRouter so a storm of GETs is shed without spending a
+// Clerk token verification on each one; body shape matches the SDK's own
+// 405 (jsonrpc error -32000).
+const statelessMethodGuard: express.RequestHandler = (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'DELETE') return next()
+    res.status(405)
+        .set('Allow', 'POST')
+        .json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Method Not Allowed: stateless server, POST only' },
+            id: null,
+        })
+}
+
 // MCP request handler. We don't use streamableHttpHandler here because it
 // pre-binds an MCP server; we want to construct ours per-request based on
-// the resolved auth source.
+// the resolved auth source. Only POST reaches this handler: text/html GETs
+// are redirected to the docs above, all other GETs and DELETEs get a 405
+// from statelessMethodGuard.
 const mcpHandler: express.RequestHandler = async (req, res) => {
-    if (req.method === 'GET' && req.headers.accept?.includes('text/html')) {
-        return res.redirect(302, DOCS_URL)
-    }
-
     try {
         const authSource = req.authSource ?? { kind: 'none' }
         const server = createMcpServer(authSource)
@@ -720,9 +799,10 @@ app.get(['/', '/mcp'], (req, res, next) => {
     res.redirect(302, DOCS_URL)
 })
 
-// MCP endpoints. authRouter runs first to decide OAuth vs API key.
-app.all('/mcp', authRouter, mcpHandler)
-app.all('/', authRouter, mcpHandler)
+// MCP endpoints. statelessMethodGuard sheds GET/DELETE, then authRouter
+// decides OAuth vs API key for the POSTs that remain.
+app.all('/mcp', statelessMethodGuard, authRouter, mcpHandler)
+app.all('/', statelessMethodGuard, authRouter, mcpHandler)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
@@ -749,14 +829,73 @@ if (CLERK_ENABLED) {
 }
 
 app.get('/health', (_req, res) => {
+    const { heapUsed, rss } = process.memoryUsage()
     res.json({
         status: 'ok',
         clerk_enabled: CLERK_ENABLED,
         agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
         mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
         build_sha: process.env.BUILD_SHA ?? 'unknown',
+        heap: {
+            used_mb: Math.round(heapUsed / MB),
+            limit_mb: Math.round(HEAP_LIMIT_BYTES / MB),
+            rss_mb: Math.round(rss / MB),
+        },
     })
 })
+
+// ============================================================================
+// Heap pressure telemetry
+//
+// The 2026-07-21 crash aborted at ~467 MB retained after full GC against a
+// ~495 MB V8 heap limit, with no warning beforehand. This monitor gives the
+// gateway logs a leading indicator and (opt-in) a heap snapshot captured
+// while there is still headroom to analyze it.
+//
+//   - Every 30s, if heap used exceeds AGENTMAIL_HEAP_WARN_MB (default 350,
+//     capped at 75% of the actual V8 limit so small dev heaps still warn
+//     before dying), log used/limit/rss.
+//   - If AGENTMAIL_HEAP_SNAPSHOT=1, additionally write ONE heap snapshot per
+//     process lifetime the first time the threshold is crossed. Opt-in and
+//     one-shot because v8.writeHeapSnapshot blocks the event loop and
+//     temporarily needs about as much memory as the heap it captures — the
+//     threshold sits well below the limit precisely so the capture can
+//     succeed. The .heapsnapshot lands in the working directory (or
+//     AGENTMAIL_HEAP_SNAPSHOT_DIR) for Chrome DevTools.
+//
+// unref() so the timer never keeps a test process (or a draining worker)
+// alive.
+// ============================================================================
+
+const MB = 1024 * 1024
+const HEAP_LIMIT_BYTES = v8.getHeapStatistics().heap_size_limit
+const HEAP_WARN_BYTES = Math.min(
+    (parseInt(process.env.AGENTMAIL_HEAP_WARN_MB || '', 10) || 350) * MB,
+    HEAP_LIMIT_BYTES * 0.75
+)
+let heapSnapshotWritten = false
+
+setInterval(() => {
+    const { heapUsed, rss } = process.memoryUsage()
+    if (heapUsed < HEAP_WARN_BYTES) return
+    console.warn(
+        `[heap] pressure: used ${Math.round(heapUsed / MB)} MB of ${Math.round(
+            HEAP_LIMIT_BYTES / MB
+        )} MB limit (rss ${Math.round(rss / MB)} MB, warn threshold ${Math.round(HEAP_WARN_BYTES / MB)} MB)`
+    )
+    if (!heapSnapshotWritten && process.env.AGENTMAIL_HEAP_SNAPSHOT === '1') {
+        heapSnapshotWritten = true
+        try {
+            const dir = process.env.AGENTMAIL_HEAP_SNAPSHOT_DIR
+            const file = v8.writeHeapSnapshot(
+                dir ? `${dir.replace(/\/$/, '')}/agentmail-mcp-${Date.now()}.heapsnapshot` : undefined
+            )
+            console.warn(`[heap] snapshot written to ${file}`)
+        } catch (error) {
+            console.error('[heap] snapshot failed:', error)
+        }
+    }
+}, 30_000).unref()
 
 // ============================================================================
 // Env var diagnostic (prints on boot to help debug Manufact injection issues).
@@ -773,6 +912,18 @@ function maskEnvVar(name: string): string {
     const safePrefix = /^(pk_|sk_|am_)/.test(firstChars) ? firstChars : '***'
     return `${name}: present (len=${val.length}, prefix=${safePrefix})`
 }
+
+// Last-resort containment. Node's default for an unhandled promise rejection
+// is to exit(1), which takes down every live SSE connection on the box and
+// triggers a client reconnect storm against the replacement process. The known
+// producer (bare-Bearer throw detached inside @clerk/mcp-tools — see
+// authRouter) is guarded above, but any future detached rejection should be
+// logged loudly and survived, not turn into a crash loop. The request that
+// caused it gets no response and times out client-side; that is strictly
+// better than dropping everyone.
+process.on('unhandledRejection', (reason) => {
+    console.error('[fatal-contained] unhandled promise rejection:', reason)
+})
 
 if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') app.listen(PORT, () => {
     console.log(`AgentMail MCP server running on port ${PORT}`)
