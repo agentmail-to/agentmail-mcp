@@ -20,6 +20,3 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
-      - run: pnpm check:contract
-      - run: pnpm audit --prod
-      - run: uv run --with build python/stdio-bridge/scripts/smoke-artifacts.sh

@@ -44,6 +44,8 @@ def fetch(url: str) -> tuple[int, bytes]:
             return response.status, response.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return 0, str(exc).encode()
 
 
 def registry(name: str) -> dict:
@@ -59,8 +61,8 @@ def audit() -> list[str]:
     if endpoint_status not in {200, 401, 405}:
         problems.append(f"canonical endpoint returned HTTP {endpoint_status}")
 
-    for name, url in CONTROLLED.items():
-        status, body = fetch(url)
+    responses = {name: fetch(url) for name, url in CONTROLLED.items()}
+    for name, (status, body) in responses.items():
         text = body.decode("utf-8", "replace")
         if status != 200:
             problems.append(f"{name} returned HTTP {status}")
@@ -69,23 +71,31 @@ def audit() -> list[str]:
             if stale.lower() in text.lower():
                 problems.append(f"{name} contains stale reference: {stale}")
 
-    status, docs = fetch(CONTROLLED["MCP docs"])
+    status, docs = responses["MCP docs"]
     text = docs.decode("utf-8", "replace")
     if status != 200 or ENDPOINT not in text:
         problems.append("published MCP docs do not advertise the canonical endpoint")
     if SOURCE not in text:
         problems.append("published MCP docs do not advertise the canonical source")
 
-    canonical = registry("to.agentmail/agentmail")
-    entries = canonical.get("servers", [])
-    if len(entries) != 1:
-        problems.append("canonical Registry identity is missing or ambiguous")
-    elif entries[0]["server"].get("remotes", [{}])[0].get("url") != ENDPOINT:
-        problems.append("canonical Registry identity advertises a different endpoint")
+    try:
+        canonical = registry("to.agentmail/agentmail")
+    except RuntimeError as exc:
+        problems.append(str(exc))
+    else:
+        entries = canonical.get("servers", [])
+        if len(entries) != 1:
+            problems.append("canonical Registry identity is missing or ambiguous")
+        elif entries[0]["server"].get("remotes", [{}])[0].get("url") != ENDPOINT:
+            problems.append("canonical Registry identity advertises a different endpoint")
 
-    legacy = registry("ai.smithery/agentmail")
-    if any(item.get("_meta", {}).get("io.modelcontextprotocol.registry/official", {}).get("status") == "active" for item in legacy.get("servers", [])):
-        problems.append("legacy Smithery Registry identity is still active")
+    try:
+        legacy = registry("ai.smithery/agentmail")
+    except RuntimeError as exc:
+        problems.append(str(exc))
+    else:
+        if any(item.get("_meta", {}).get("io.modelcontextprotocol.registry/official", {}).get("status") == "active" for item in legacy.get("servers", [])):
+            problems.append("legacy Smithery Registry identity is still active")
     return problems
 
 
