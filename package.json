@@ -7,9 +7,9 @@
         "start": "pnpm --filter @agentmail/mcp-server start",
         "generate:manifest": "pnpm --filter @agentmail/mcp-server build && node scripts/generate-manifest.mjs",
         "check:bridges": "node scripts/check-bridge-boundaries.mjs",
-        "check:contract": "node scripts/check-contract.mjs",
+        "check:contract": "pnpm --filter @agentmail/mcp-server build && node scripts/check-contract.mjs",
         "test:python": "uv run --no-project --with ./python/stdio-bridge --with pytest pytest -q python/stdio-bridge/tests",
-        "test": "pnpm --filter agentmail-mcp test && pnpm generate:manifest && node --test tests/*.test.mjs && pnpm test:python && pnpm check:bridges"
+        "test": "pnpm check:contract && pnpm --filter agentmail-mcp test && node --test tests/*.test.mjs && pnpm test:python && pnpm check:bridges"
     },
     "devDependencies": {
         "@modelcontextprotocol/sdk": "1.29.0"

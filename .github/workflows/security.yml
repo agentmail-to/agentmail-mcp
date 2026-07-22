@@ -1,0 +1,32 @@
+name: Audit production dependencies
+
+on:
+  pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - packages/*/package.json
+      - .github/workflows/security.yml
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - packages/*/package.json
+      - .github/workflows/security.yml
+  schedule:
+    - cron: "47 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.4
+      - run: pnpm audit --prod --audit-level high

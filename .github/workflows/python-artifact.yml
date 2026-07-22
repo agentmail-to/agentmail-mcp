@@ -1,0 +1,27 @@
+name: Smoke Python package
+
+on:
+  pull_request:
+    paths:
+      - python/stdio-bridge/**
+      - .github/workflows/python-artifact.yml
+  push:
+    branches: [main]
+    paths:
+      - python/stdio-bridge/**
+      - .github/workflows/python-artifact.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.11.28
+          python-version: "3.12"
+      - run: uv run --with build python/stdio-bridge/scripts/smoke-artifacts.sh
