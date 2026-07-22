@@ -15,9 +15,18 @@ test('malformed Authorization headers get a 401 challenge instead of crashing th
   await new Promise((resolve) => server.once('listening', resolve))
   const { port } = server.address()
 
-  // Each of these made @clerk/mcp-tools throw on a detached promise, which
-  // exited Node with code 1 (Jul 19 incidents at 10:03/10:13/10:14 UTC).
-  for (const authorization of ['Bearer', 'bearer', 'not-a-bearer-header']) {
+  // Cover both the bare/malformed scheme shapes that reached
+  // @clerk/mcp-tools and JWT-shaped input that fails in the earlier global
+  // Clerk request middleware.
+  for (const authorization of [
+    'Bearer',
+    'bearer',
+    'not-a-bearer-header',
+    // A three-segment token gets past the bare-Bearer guard, then fails while
+    // the global Clerk middleware decodes its JWT payload. Production returned
+    // an HTML 500 for this shape instead of restarting OAuth.
+    'Bearer abc.def.ghi',
+  ]) {
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: 'POST',
       headers: {

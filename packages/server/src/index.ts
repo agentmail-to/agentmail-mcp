@@ -703,6 +703,31 @@ function publicUrlOverride(req: express.Request, _res: express.Response, next: e
     next()
 }
 
+// Clerk's request middleware runs before authRouter because mcpAuthClerk relies
+// on the auth state it installs on req. Treat it as an untrusted-input boundary:
+// malformed JWT-shaped Bearer tokens can throw while Clerk decodes them, before
+// authRouter's own guards or error handling get a chance to run. Convert those
+// failures into the same 401 OAuth challenge as every other invalid credential
+// instead of letting Express's default handler expose a stack trace in an HTML
+// 500 response.
+//
+// AgentMail API keys must bypass Clerk entirely. Reusing extractApiKey here and
+// in authRouter keeps both layers' routing decisions identical.
+const clerkRequestMiddleware = CLERK_ENABLED ? clerkMiddleware() : undefined
+
+const clerkAuthBoundary: express.RequestHandler = (req, res, next) => {
+    if (!clerkRequestMiddleware || extractApiKey(req)) return next()
+
+    return clerkRequestMiddleware(req, res, (error?: unknown) => {
+        if (!error) return next()
+
+        const errorName = error instanceof Error ? error.name : 'UnknownError'
+        console.warn(`[auth] Clerk request authentication failed (${errorName}), returning 401`)
+        if (!res.headersSent) return sendOAuthChallenge(req, res)
+        next(error)
+    })
+}
+
 // ============================================================================
 // Express app
 // ============================================================================
@@ -717,13 +742,11 @@ export const app = express()
 app.set('trust proxy', true)
 
 // Normalize req.headers.host to MCP_PUBLIC_URL if set. Must run BEFORE cors
-// and clerkMiddleware so they see the normalized URL.
+// and the Clerk auth boundary so downstream auth sees the normalized URL.
 app.use(publicUrlOverride)
 
 app.use(cors({ exposedHeaders: ['WWW-Authenticate'] }))
-if (CLERK_ENABLED) {
-    app.use(clerkMiddleware())
-}
+app.use(clerkAuthBoundary)
 // Match the AgentMail API's inbound ceiling exactly. The API runs on API
 // Gateway v2 (HTTP API), whose max request body is a hard, non-configurable
 // 10 MB (agentmail-api infra/core/gateway.ts uses apigatewayv2.Api with no
