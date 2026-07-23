@@ -3,9 +3,11 @@ import test from 'node:test'
 
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 
-const { getInternalOrganizationId, getOrProvisionClerkMemberships } = await import(
-  '../packages/server/build/index.js'
-)
+const {
+  getClerkMembershipsForRequest,
+  getInternalOrganizationId,
+  getOrProvisionClerkMemberships,
+} = await import('../packages/server/build/index.js')
 
 const organization = (id = 'org_existing', name = 'Existing Organization') => ({
   id,
@@ -58,7 +60,6 @@ test('zero-org users get a personal organization with the console naming convent
 
   assert.deepEqual(createParams, {
     name: "Sanjith's Organization",
-    slug: 'agentmail-cf2f0253ba7a251de6294b86',
     createdBy: 'user_fresh',
     privateMetadata: { agentmailProvisionedBy: 'mcp' },
   })
@@ -132,6 +133,36 @@ test('a membership created by another actor recovers a Clerk create conflict', a
   assert.equal(result, appeared)
 })
 
+test('an explicit token org never provisions when its user has zero memberships', async () => {
+  let getUserCalls = 0
+  let createCalls = 0
+  let sleepCalls = 0
+
+  const result = await getClerkMembershipsForRequest(
+    'user_stale_token',
+    'org_stale',
+    dependencies({
+      graceDelaysMs: [10, 20],
+      getUser: async () => {
+        getUserCalls += 1
+        return { firstName: 'Ada' }
+      },
+      createOrganization: async () => {
+        createCalls += 1
+        return organization('org_unexpected')
+      },
+      sleep: async () => {
+        sleepCalls += 1
+      },
+    }),
+  )
+
+  assert.deepEqual(result, [])
+  assert.equal(getUserCalls, 0)
+  assert.equal(createCalls, 0)
+  assert.equal(sleepCalls, 0)
+})
+
 test('internal organization lookup waits for the Clerk webhook mapping', async () => {
   const statuses = [403, 404, 200]
   const waits = []
@@ -159,6 +190,28 @@ test('internal organization lookup waits for the Clerk webhook mapping', async (
 
   assert.equal(result, 'internal_org')
   assert.equal(signCalls, 1)
+  assert.equal(fetchCalls, 3)
+  assert.deepEqual(waits, [100, 250])
+})
+
+test('exhausted organization mapping retries return a retryable user-facing error', async () => {
+  let fetchCalls = 0
+  const waits = []
+
+  await assert.rejects(
+    getInternalOrganizationId('org_still_provisioning', {
+      apiUrl: 'https://api.example.test',
+      signToken: async () => 'bootstrap-token',
+      fetcher: async () => {
+        fetchCalls += 1
+        return new Response('mapping not found', { status: 404 })
+      },
+      sleep: async (ms) => waits.push(ms),
+      retryDelaysMs: [100, 250],
+    }),
+    /workspace is still provisioning\. Retry this tool in a few seconds\./,
+  )
+
   assert.equal(fetchCalls, 3)
   assert.deepEqual(waits, [100, 250])
 })
