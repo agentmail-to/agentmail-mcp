@@ -54,6 +54,8 @@ const AGENTMAIL_WS_URL = AGENTMAIL_API_URL?.replace('https://api.', 'wss://ws.')
 
 const CLERK_ENABLED = Boolean(process.env.CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY)
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 // Public URL of this MCP server (the URL that outside clients hit).
 // Optional. When set, we force Express + @clerk/mcp-tools to use this as the
 // base URL when composing self-referential URLs (WWW-Authenticate
@@ -143,32 +145,62 @@ async function signConsoleJwt(organizationId: string): Promise<string> {
         .sign(privateKey)
 }
 
+type InternalOrganizationLookupDependencies = {
+    apiUrl: string | undefined
+    signToken: (clerkOrgId: string) => Promise<string>
+    fetcher: typeof fetch
+    sleep: (ms: number) => Promise<void>
+    retryDelaysMs: readonly number[]
+}
+
+const INTERNAL_ORG_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const
+
 /**
  * Resolve AgentMail internal org id from a Clerk org id.
  * Mirrors console/app/lib/agentmail-jwt.server.ts getInternalOrganizationId.
+ *
+ * Clerk emits organization.created asynchronously. A newly-created Clerk org
+ * can therefore be visible to the MCP server shortly before the AgentMail
+ * organization webhook has written its mapping. Retry only that expected
+ * 403/404 window; other upstream failures still surface immediately.
  */
-async function getInternalOrganizationId(clerkOrgId: string): Promise<string> {
-    const bootstrapJwt = await signConsoleJwt(clerkOrgId)
-    const apiUrl = AGENTMAIL_API_URL
+export async function getInternalOrganizationId(
+    clerkOrgId: string,
+    dependencies?: InternalOrganizationLookupDependencies
+): Promise<string> {
+    const { apiUrl, signToken, fetcher, sleep: wait, retryDelaysMs } = dependencies ?? {
+        apiUrl: AGENTMAIL_API_URL,
+        signToken: signConsoleJwt,
+        fetcher: fetch,
+        sleep,
+        retryDelaysMs: INTERNAL_ORG_RETRY_DELAYS_MS,
+    }
     if (!apiUrl) {
         throw new Error('AGENTMAIL_API_URL env var is required to use OAuth path')
     }
 
-    const response = await fetch(`${apiUrl}/v0/auth/internal-org`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${bootstrapJwt}` },
-    })
+    const bootstrapJwt = await signToken(clerkOrgId)
+    for (let attempt = 0; ; attempt += 1) {
+        const response = await fetcher(`${apiUrl}/v0/auth/internal-org`, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${bootstrapJwt}` },
+        })
 
-    if (!response.ok) {
+        if (response.ok) {
+            const data = (await response.json()) as { organization_id?: string }
+            if (!data.organization_id) {
+                throw new Error('No organization_id in /v0/auth/internal-org response')
+            }
+            return data.organization_id
+        }
+
         const body = await response.text()
-        throw new Error(`/v0/auth/internal-org failed: ${response.status} ${body}`)
+        const retryable = response.status === 403 || response.status === 404
+        if (!retryable || attempt >= retryDelaysMs.length) {
+            throw new Error(`/v0/auth/internal-org failed: ${response.status} ${body}`)
+        }
+        await wait(retryDelaysMs[attempt]!)
     }
-
-    const data = (await response.json()) as { organization_id?: string }
-    if (!data.organization_id) {
-        throw new Error('No organization_id in /v0/auth/internal-org response')
-    }
-    return data.organization_id
 }
 
 /**
@@ -221,6 +253,120 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
     })
 }
 
+type ClerkOrganization = {
+    id: string
+    name: string
+    publicMetadata: Record<string, unknown> | null
+}
+
+type ClerkOrganizationMembership = {
+    organization: ClerkOrganization
+}
+
+type ClerkOrganizationProvisioningDependencies = {
+    listMemberships: (clerkUserId: string) => Promise<ClerkOrganizationMembership[]>
+    getUser: (clerkUserId: string) => Promise<{ firstName: string | null }>
+    createOrganization: (params: {
+        name: string
+        slug: string
+        createdBy: string
+        privateMetadata: Record<string, unknown>
+    }) => Promise<ClerkOrganization>
+    sleep: (ms: number) => Promise<void>
+    graceDelaysMs: readonly number[]
+}
+
+const ZERO_ORG_GRACE_DELAYS_MS = [250, 500, 1_000, 2_000] as const
+const zeroOrgProvisioningByUser = new Map<string, Promise<ClerkOrganizationMembership[]>>()
+
+function provisionedOrganizationSlug(clerkUserId: string): string {
+    const userHash = crypto.createHash('sha256').update(clerkUserId).digest('hex').slice(0, 24)
+    return `agentmail-${userHash}`
+}
+
+const defaultClerkProvisioningDependencies = (): ClerkOrganizationProvisioningDependencies => ({
+    listMemberships: async (clerkUserId) => {
+        const memberships = await clerkClient.users.getOrganizationMembershipList({
+            userId: clerkUserId,
+        })
+        return memberships.data as ClerkOrganizationMembership[]
+    },
+    getUser: async (clerkUserId) => {
+        const user = await clerkClient.users.getUser(clerkUserId)
+        return { firstName: user.firstName }
+    },
+    createOrganization: async (params) => {
+        const organization = await clerkClient.organizations.createOrganization(params)
+        return organization as ClerkOrganization
+    },
+    sleep,
+    graceDelaysMs: ZERO_ORG_GRACE_DELAYS_MS,
+})
+
+/**
+ * Return the user's memberships, provisioning a personal organization when a
+ * connector-first OAuth user genuinely has none.
+ *
+ * The grace polls give the normal browser-based console flow time to finish.
+ * The per-user single-flight prevents simultaneous first tool calls in this
+ * process from creating duplicate organizations. If another actor wins the
+ * race while Clerk rejects our create, the final membership read recovers.
+ */
+export async function getOrProvisionClerkMemberships(
+    clerkUserId: string,
+    dependencies: ClerkOrganizationProvisioningDependencies = defaultClerkProvisioningDependencies()
+): Promise<ClerkOrganizationMembership[]> {
+    const memberships = await dependencies.listMemberships(clerkUserId)
+    if (memberships.length > 0) return memberships
+
+    const existingProvisioning = zeroOrgProvisioningByUser.get(clerkUserId)
+    if (existingProvisioning) return existingProvisioning
+
+    const provisioning = (async () => {
+        for (const delayMs of dependencies.graceDelaysMs) {
+            await dependencies.sleep(delayMs)
+            const appeared = await dependencies.listMemberships(clerkUserId)
+            if (appeared.length > 0) return appeared
+        }
+
+        const user = await dependencies.getUser(clerkUserId)
+        const firstName = user.firstName?.trim() || 'My'
+
+        try {
+            const organization = await dependencies.createOrganization({
+                name: `${firstName}'s Organization`,
+                // Clerk requires organization slugs to be unique per instance.
+                // A deterministic, opaque slug makes concurrent creates on
+                // separate MCP replicas converge on one organization.
+                slug: provisionedOrganizationSlug(clerkUserId),
+                createdBy: clerkUserId,
+                privateMetadata: { agentmailProvisionedBy: 'mcp' },
+            })
+            console.info('[auth] provisioned Clerk organization for zero-org OAuth user', {
+                clerkUserId,
+                clerkOrganizationId: organization.id,
+            })
+            return [{ organization }]
+        } catch (error) {
+            // The browser console or another server may have created the org
+            // after our last read. Prefer the resulting membership over
+            // surfacing an otherwise harmless create race.
+            const appeared = await dependencies.listMemberships(clerkUserId)
+            if (appeared.length > 0) return appeared
+            throw error
+        }
+    })()
+
+    zeroOrgProvisioningByUser.set(clerkUserId, provisioning)
+    try {
+        return await provisioning
+    } finally {
+        if (zeroOrgProvisioningByUser.get(clerkUserId) === provisioning) {
+            zeroOrgProvisioningByUser.delete(clerkUserId)
+        }
+    }
+}
+
 /**
  * Build an AgentMailClient backed by a console JWT for the user's selected org.
  *
@@ -229,12 +375,14 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  *      the user picked an org on the Clerk consent screen): use it. Validate
  *      membership defensively. Currently only Claude's privileged app can emit
  *      this; DCR clients never do (Clerk doesn't grant them user:org:read).
- *   2. Else if the user belongs to exactly one org: use it (single-org users
+ *   2. Else if the user belongs to zero orgs: provision a personal org, wait
+ *      for its AgentMail mapping, and use it.
+ *   3. Else if the user belongs to exactly one org: use it (single-org users
  *      never need to choose).
- *   3. Else (multi-org user) consult the org they picked via `select_organization`
+ *   4. Else (multi-org user) consult the org they picked via `select_organization`
  *      (stored in Clerk privateMetadata). If set and still a valid membership,
  *      use it.
- *   4. Else: refuse. Silently picking memberships[0] could land destructive ops
+ *   5. Else: refuse. Silently picking memberships[0] could land destructive ops
  *      (e.g. delete_inbox) in the wrong org. Throw a clear error listing the
  *      orgs and telling the user to call `select_organization` first.
  *
@@ -245,20 +393,12 @@ async function buildClientFromClerkUser(
     clerkUserId: string,
     selectedClerkOrgId?: string
 ): Promise<AgentMailClient> {
-    const memberships = await clerkClient.users.getOrganizationMembershipList({
-        userId: clerkUserId,
-    })
-    if (!memberships.data || memberships.data.length === 0) {
-        throw new Error(
-            `User ${clerkUserId} has no Clerk organization memberships. ` +
-                `Every AgentMail user is expected to belong to at least one org.`
-        )
-    }
+    const memberships = await getOrProvisionClerkMemberships(clerkUserId)
 
     let chosenOrg
     if (selectedClerkOrgId) {
         // Path 1: token specified an org. Validate membership before trusting it.
-        const matching = memberships.data.find(
+        const matching = memberships.find(
             (m) => m.organization.id === selectedClerkOrgId
         )
         if (!matching) {
@@ -268,22 +408,22 @@ async function buildClientFromClerkUser(
             )
         }
         chosenOrg = matching.organization
-    } else if (memberships.data.length === 1) {
+    } else if (memberships.length === 1) {
         // Path 2: single-org user. Safe to pick the only org.
-        chosenOrg = memberships.data[0]!.organization
+        chosenOrg = memberships[0]!.organization
     } else {
         // Path 3/4: multi-org user, no org_id in token. Use the org they picked
         // via `select_organization`; otherwise refuse and tell them to pick one.
         const storedOrgId = await getStoredMcpOrgId(clerkUserId)
         const matching = storedOrgId
-            ? memberships.data.find((m) => m.organization.id === storedOrgId)
+            ? memberships.find((m) => m.organization.id === storedOrgId)
             : undefined
         if (!matching) {
-            const orgList = memberships.data
+            const orgList = memberships
                 .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                 .join('\n')
             throw new Error(
-                `You belong to ${memberships.data.length} organizations and haven't selected one yet. ` +
+                `You belong to ${memberships.length} organizations and haven't selected one yet. ` +
                     `Call the \`select_organization\` tool with one of these, then retry:\n${orgList}`
             )
         }
@@ -294,6 +434,20 @@ async function buildClientFromClerkUser(
     let internalOrgId = meta?.internalOrgId as string | undefined
     if (!internalOrgId) {
         internalOrgId = await getInternalOrganizationId(chosenOrg.id)
+        try {
+            await clerkClient.organizations.updateOrganizationMetadata(chosenOrg.id, {
+                publicMetadata: { internalOrgId },
+            })
+        } catch (error) {
+            // The mapping is already usable for this request. A cache write
+            // failure should make later calls repeat the lookup, not fail the
+            // user's tool call.
+            const errorName = error instanceof Error ? error.name : 'UnknownError'
+            console.warn('[auth] failed to cache AgentMail organization mapping in Clerk', {
+                clerkOrganizationId: chosenOrg.id,
+                errorName,
+            })
+        }
     }
 
     const consoleJwt = await signConsoleJwt(internalOrgId)
