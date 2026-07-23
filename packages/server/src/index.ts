@@ -285,7 +285,17 @@ type ClerkOrganizationProvisioningDependencies = {
     graceDelaysMs: readonly number[]
 }
 
-const ZERO_ORG_GRACE_DELAYS_MS = [250, 500, 1_000, 2_000] as const
+// Connector-first users have no browser bootstrap to wait for and pay this
+// entire sequence on their first operational call. Keep the grace window
+// short while still allowing a concurrently-loading console page to win.
+const ZERO_ORG_GRACE_DELAYS_MS = [250, 500, 1_000] as const
+
+// This is deliberately only a process-local single-flight. It collapses
+// parallel first calls handled by this Node process, but it is not a
+// distributed lock: separate server instances can still both create an
+// organization if their final membership reads race. Clerk has no
+// createOrganization idempotency key, so exact-once provisioning requires a
+// centralized AgentMail ensure operation or Clerk-managed automatic creation.
 const zeroOrgProvisioningByUser = new Map<string, Promise<ClerkOrganizationMembership[]>>()
 
 const defaultClerkProvisioningDependencies = (): ClerkOrganizationProvisioningDependencies => ({
