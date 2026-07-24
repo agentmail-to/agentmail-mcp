@@ -54,6 +54,8 @@ const AGENTMAIL_WS_URL = AGENTMAIL_API_URL?.replace('https://api.', 'wss://ws.')
 
 const CLERK_ENABLED = Boolean(process.env.CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY)
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 // Public URL of this MCP server (the URL that outside clients hit).
 // Optional. When set, we force Express + @clerk/mcp-tools to use this as the
 // base URL when composing self-referential URLs (WWW-Authenticate
@@ -143,32 +145,85 @@ async function signConsoleJwt(organizationId: string): Promise<string> {
         .sign(privateKey)
 }
 
+type InternalOrganizationLookupDependencies = {
+    apiUrl: string | undefined
+    signToken: (clerkOrgId: string) => Promise<string>
+    fetcher: typeof fetch
+    sleep: (ms: number) => Promise<void>
+    retryDelaysMs: readonly number[]
+}
+
+export const INTERNAL_ORG_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 2_000] as const
+
+function isOrganizationMappingUnavailable(status: number, body: string): boolean {
+    // Compatibility with the previously deployed /internal-org behavior.
+    if (status === 403) return true
+    if (status !== 404) return false
+
+    try {
+        const error = JSON.parse(body) as { code?: unknown; message?: unknown }
+        return error.code === 'not_found' && error.message === 'Organization not found'
+    } catch {
+        return false
+    }
+}
+
 /**
  * Resolve AgentMail internal org id from a Clerk org id.
- * Mirrors console/app/lib/agentmail-jwt.server.ts getInternalOrganizationId.
+ * Mirrors console/app/lib/agentmail-jwt.server.ts lookupOrganization.
+ *
+ * Clerk emits organization.created asynchronously. A newly-created Clerk org
+ * can therefore be visible to the MCP server shortly before the AgentMail
+ * organization webhook has written its mapping. Retry only responses that
+ * identify that expected window; other upstream failures surface immediately.
  */
-async function getInternalOrganizationId(clerkOrgId: string): Promise<string> {
-    const bootstrapJwt = await signConsoleJwt(clerkOrgId)
-    const apiUrl = AGENTMAIL_API_URL
+export async function getInternalOrganizationId(
+    clerkOrgId: string,
+    dependencies?: InternalOrganizationLookupDependencies
+): Promise<string> {
+    const { apiUrl, signToken, fetcher, sleep: wait, retryDelaysMs } = dependencies ?? {
+        apiUrl: AGENTMAIL_API_URL,
+        signToken: signConsoleJwt,
+        fetcher: fetch,
+        sleep,
+        retryDelaysMs: INTERNAL_ORG_RETRY_DELAYS_MS,
+    }
     if (!apiUrl) {
         throw new Error('AGENTMAIL_API_URL env var is required to use OAuth path')
     }
 
-    const response = await fetch(`${apiUrl}/v0/auth/internal-org`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${bootstrapJwt}` },
-    })
+    const bootstrapJwt = await signToken(clerkOrgId)
+    for (let attempt = 0; ; attempt += 1) {
+        const response = await fetcher(`${apiUrl}/v0/auth/internal-org`, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${bootstrapJwt}` },
+        })
 
-    if (!response.ok) {
+        if (response.ok) {
+            const data = (await response.json()) as { organization_id?: string }
+            if (!data.organization_id) {
+                throw new Error('No organization_id in /v0/auth/internal-org response')
+            }
+            return data.organization_id
+        }
+
         const body = await response.text()
-        throw new Error(`/v0/auth/internal-org failed: ${response.status} ${body}`)
+        const retryable = isOrganizationMappingUnavailable(response.status, body)
+        if (!retryable) {
+            throw new Error(`/v0/auth/internal-org failed: ${response.status} ${body}`)
+        }
+        if (attempt >= retryDelaysMs.length) {
+            console.warn('[auth] AgentMail organization mapping is still unavailable', {
+                clerkOrganizationId: clerkOrgId,
+                status: response.status,
+                body,
+            })
+            throw new Error(
+                'Your AgentMail workspace is still provisioning. Retry this tool in a few seconds.'
+            )
+        }
+        await wait(retryDelaysMs[attempt]!)
     }
-
-    const data = (await response.json()) as { organization_id?: string }
-    if (!data.organization_id) {
-        throw new Error('No organization_id in /v0/auth/internal-org response')
-    }
-    return data.organization_id
 }
 
 /**
@@ -238,6 +293,10 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  *      (e.g. delete_inbox) in the wrong org. Throw a clear error listing the
  *      orgs and telling the user to call `select_organization` first.
  *
+ * Zero memberships is anomalous because Clerk normally creates a user's first
+ * organization during sign-up. The MCP server does not create organizations;
+ * users recover through the console's manual setup flow.
+ *
  * This makes multi-org work for every client (Claude/Cursor/Codex) without
  * depending on the Clerk consent-screen org picker or per-client UA hacks.
  */
@@ -250,8 +309,8 @@ async function buildClientFromClerkUser(
     })
     if (!memberships.data || memberships.data.length === 0) {
         throw new Error(
-            `User ${clerkUserId} has no Clerk organization memberships. ` +
-                `Every AgentMail user is expected to belong to at least one org.`
+            'Your account has no AgentMail Organization yet. Sign in once at ' +
+                'https://console.agentmail.to to finish setup, then retry this tool.'
         )
     }
 
