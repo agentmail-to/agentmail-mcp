@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:25908bd6aeeb5567547e34b0b336b41cff8eb68e67466e7082fedfe0d9d0cfa0",
+  "digest": "sha256:61c307d233cfad695f17682c4d813f22ec2b7f419b594163e6b953cabd7e2ce4",
   "tools": [
     {
       "name": "list_inboxes",
@@ -3273,62 +3273,6 @@
       "oauthOnly": false
     },
     {
-      "name": "auth_me",
-      "title": "Auth Me",
-      "description": "Get the identity and scope of the authenticated credential, including organization, pod, and inbox IDs.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "$schema": "http://json-schema.org/draft-07/schema#"
-      },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "scopeType": {
-            "type": "string",
-            "enum": [
-              "organization",
-              "pod",
-              "inbox"
-            ]
-          },
-          "scopeId": {
-            "type": "string"
-          },
-          "organizationId": {
-            "type": "string"
-          },
-          "podId": {
-            "type": "string"
-          },
-          "inboxId": {
-            "type": "string"
-          },
-          "apiKeyId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "scopeType",
-          "scopeId",
-          "organizationId"
-        ],
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false
-      },
-      "annotations": {
-        "title": "Auth Me",
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "execution": {
-        "taskSupport": "forbidden"
-      },
-      "oauthOnly": false
-    },
-    {
       "name": "list_organizations",
       "title": "List organizations",
       "description": "List the organizations you belong to and show which one is currently selected for AgentMail operations. Use `select_organization` to change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
@@ -3384,7 +3328,7 @@
     {
       "name": "select_organization",
       "title": "Select organization",
-      "description": "Choose which organization your AgentMail operations target (for users who belong to multiple orgs). Accepts an organization name or ID. The choice persists across sessions until you change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
+      "description": "Choose which organization your AgentMail operations target (for users who belong to multiple orgs). Accepts an organization name or ID. The choice persists across unpinned sessions until you change it; a session already pinned to an organization by OAuth must be reconnected to change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
       "inputSchema": {
         "type": "object",
         "properties": {
