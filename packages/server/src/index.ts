@@ -309,7 +309,7 @@ async function buildClientFromClerkUser(
     })
     if (!memberships.data || memberships.data.length === 0) {
         throw new Error(
-            'Your account has no AgentMail workspace yet. Sign in once at ' +
+            'Your account has no AgentMail Organization yet. Sign in once at ' +
                 'https://console.agentmail.to to finish setup, then retry this tool.'
         )
     }
