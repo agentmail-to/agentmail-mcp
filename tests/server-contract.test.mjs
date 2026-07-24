@@ -30,12 +30,12 @@ const coreTools = [
   'update_draft',
   'send_draft',
   'delete_draft',
-  'auth_me',
 ]
 const oauthTools = ['list_organizations', 'select_organization']
 
 test('runtime manifest has the canonical tool contract exactly once', () => {
   const names = manifest.tools.map(({ name }) => name)
+  assert.equal(names.length, 25)
   assert.equal(new Set(names).size, names.length)
   assert.deepEqual(
     names.filter((name) => !oauthTools.includes(name)).sort(),

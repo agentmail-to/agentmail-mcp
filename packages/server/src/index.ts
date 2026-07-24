@@ -33,6 +33,7 @@ import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
 import v8 from 'node:v8'
@@ -45,6 +46,14 @@ import { z } from 'zod'
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const DOCS_URL = 'https://docs.agentmail.to/integrations/mcp'
 const OPENAI_APPS_CHALLENGE_TOKEN = 'x5q5TTetk6mOB_sFlNKxXnvES1T8slSZXyWOL-T2b1s'
+export const GENERIC_TOOL_ERROR_MESSAGE =
+    'AgentMail could not complete the request. Retry, and reconnect your account if the problem continues.'
+export const MULTI_ORG_SELECTION_REQUIRED_MESSAGE =
+    'Multiple AgentMail organizations are available. Call `list_organizations`, then `select_organization` before retrying.'
+export const INVALID_ORG_SELECTION_MESSAGE =
+    'No matching organization was found. Call `list_organizations`, then retry `select_organization` with an organization shown there.'
+export const PINNED_ORG_SELECTION_CONFLICT_MESSAGE =
+    'This OAuth session is pinned to a different organization. Reconnect and choose the intended organization, then retry.'
 
 // Where the AgentMail backend lives. Manufact env var should set this per
 // deployment (staging vs prod). The previous behavior was an unset URL =
@@ -218,8 +227,9 @@ export async function getInternalOrganizationId(
                 status: response.status,
                 body,
             })
-            throw new Error(
-                'Your AgentMail workspace is still provisioning. Retry this tool in a few seconds.'
+            throw new ActionableToolError(
+                'Your AgentMail workspace is still provisioning. Retry this tool in a few seconds.',
+                `AgentMail organization mapping is still unavailable for Clerk organization ${clerkOrgId}: ${response.status} ${body}`
             )
         }
         await wait(retryDelaysMs[attempt]!)
@@ -290,8 +300,8 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  *      (stored in Clerk privateMetadata). If set and still a valid membership,
  *      use it.
  *   4. Else: refuse. Silently picking memberships[0] could land destructive ops
- *      (e.g. delete_inbox) in the wrong org. Throw a clear error listing the
- *      orgs and telling the user to call `select_organization` first.
+ *      (e.g. delete_inbox) in the wrong org. Tell the user to list and select
+ *      an organization without copying private organization data into the error.
  *
  * Zero memberships is anomalous because Clerk normally creates a user's first
  * organization during sign-up. The MCP server does not create organizations;
@@ -308,9 +318,10 @@ async function buildClientFromClerkUser(
         userId: clerkUserId,
     })
     if (!memberships.data || memberships.data.length === 0) {
-        throw new Error(
-            'Your account has no AgentMail Organization yet. Sign in once at ' +
-                'https://console.agentmail.to to finish setup, then retry this tool.'
+        throw new ActionableToolError(
+            'Your account has no AgentMail organization yet. Sign in at ' +
+                'https://console.agentmail.to to finish setup, then retry this tool.',
+            `Clerk user ${clerkUserId} has no AgentMail organization memberships`
         )
     }
 
@@ -341,9 +352,9 @@ async function buildClientFromClerkUser(
             const orgList = memberships.data
                 .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                 .join('\n')
-            throw new Error(
-                `You belong to ${memberships.data.length} organizations and haven't selected one yet. ` +
-                    `Call the \`select_organization\` tool with one of these, then retry:\n${orgList}`
+            throw new ActionableToolError(
+                MULTI_ORG_SELECTION_REQUIRED_MESSAGE,
+                `Clerk user ${clerkUserId} has ${memberships.data.length} organizations but no valid selection:\n${orgList}`
             )
         }
         chosenOrg = matching.organization
@@ -389,6 +400,126 @@ type AuthSource =
     | { kind: 'apiKey'; apiKey: string }
     | { kind: 'none' }
 
+export class ActionableToolError extends Error {
+    readonly diagnosticMessage: string
+
+    constructor(
+        readonly publicMessage: string,
+        diagnosticMessage = publicMessage
+    ) {
+        super(publicMessage)
+        this.name = 'ActionableToolError'
+        this.diagnosticMessage = diagnosticMessage
+    }
+}
+
+export function publicToolFailure(context: string, error: unknown): CallToolResult {
+    console.error(`[mcp] ${context} failed:`, error)
+    const message =
+        error instanceof ActionableToolError ? error.publicMessage : GENERIC_TOOL_ERROR_MESSAGE
+    return {
+        content: [{ type: 'text', text: message }],
+        isError: true,
+    }
+}
+
+const INBOX_OUTPUT_TOOL_NAMES = new Set([
+    'list_inboxes',
+    'get_inbox',
+    'create_inbox',
+    'update_inbox',
+])
+
+function omitMetadata<T extends object>(shape: T): Omit<T, 'metadata'> {
+    const { metadata: _metadata, ...withoutMetadata } = shape as T & { metadata?: unknown }
+    return withoutMetadata as Omit<T, 'metadata'>
+}
+
+type ZodObjectLike = {
+    shape: object
+    omit: (mask: { metadata: true }) => unknown
+}
+
+function isZodObjectLike(schema: object): schema is object & ZodObjectLike {
+    const candidate = schema as Partial<ZodObjectLike>
+    return Boolean(candidate.shape) && typeof candidate.omit === 'function'
+}
+
+export function omitHostedInboxMetadataInput<T extends object>(inputSchema: T): T {
+    if (isZodObjectLike(inputSchema)) {
+        return inputSchema.omit({ metadata: true }) as T
+    }
+    return omitMetadata(inputSchema) as T
+}
+
+export function resolveEffectiveSelectedOrganizationId(
+    clerkOrgId: string | undefined,
+    membershipOrgIds: readonly string[],
+    storedOrgId: string | undefined
+): string | undefined {
+    if (clerkOrgId) return clerkOrgId
+    if (membershipOrgIds.length === 1) return membershipOrgIds[0]
+    return storedOrgId
+}
+
+export function conflictsWithPinnedOrganization(
+    clerkOrgId: string | undefined,
+    selectedOrgId: string
+): boolean {
+    return Boolean(clerkOrgId && clerkOrgId !== selectedOrgId)
+}
+
+function stripInboxMetadata(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+    const { metadata: _metadata, ...withoutMetadata } = value as Record<string, unknown>
+    return withoutMetadata
+}
+
+function sanitizeInboxStructuredContent(
+    toolName: string,
+    structuredContent: Record<string, unknown>
+): Record<string, unknown> {
+    if (toolName === 'list_inboxes') {
+        const inboxes = structuredContent.inboxes
+        return {
+            ...structuredContent,
+            ...(Array.isArray(inboxes)
+                ? { inboxes: inboxes.map((inbox) => stripInboxMetadata(inbox)) }
+                : {}),
+        }
+    }
+    return stripInboxMetadata(structuredContent) as Record<string, unknown>
+}
+
+export function sanitizeHostedToolResult(
+    toolName: string,
+    result: CallToolResult
+): CallToolResult {
+    if (result.isError || !INBOX_OUTPUT_TOOL_NAMES.has(toolName)) {
+        return result
+    }
+    if (!result.structuredContent) {
+        return publicToolFailure(
+            `tool ${toolName}`,
+            new Error('Successful inbox result did not include structuredContent')
+        )
+    }
+
+    const structuredContent = sanitizeInboxStructuredContent(
+        toolName,
+        result.structuredContent
+    )
+    return {
+        ...result,
+        structuredContent,
+        content: result.content.map((item) =>
+            item.type === 'text'
+                ? { ...item, text: JSON.stringify(structuredContent) }
+                : item
+        ),
+    }
+}
+
 // Tool definitions are static metadata (name/description/schemas) — identical
 // for every request — so enumerate them once at module load. Previously each
 // incoming request built its own placeholder AgentMailClient + AgentMailToolkit
@@ -397,7 +528,45 @@ type AuthSource =
 // heap exhaustion. The real, per-auth client is still built inside the tool
 // callback at invocation time.
 const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeholder' }))
-const STATIC_TOOLS = staticToolkit.getTools()
+const toolkitTools = staticToolkit.getTools()
+const inboxOutputShape = toolkitTools.find((tool) => tool.name === 'get_inbox')?.outputSchema
+if (!inboxOutputShape) throw new Error('agentmail-toolkit is missing get_inbox output schema')
+const hostedInboxSchema = z.object(omitMetadata(inboxOutputShape))
+
+const STATIC_TOOLS = toolkitTools
+    .filter((tool) => tool.name !== 'auth_me')
+    .map((tool) => {
+        if (tool.name === 'create_inbox') {
+            return {
+                ...tool,
+                description:
+                    'Create a new email inbox. Optionally specify username, domain, and display name.',
+                inputSchema: omitHostedInboxMetadataInput(tool.inputSchema),
+                outputSchema: omitMetadata(tool.outputSchema),
+            }
+        }
+        if (tool.name === 'update_inbox') {
+            return {
+                ...tool,
+                description: "Update an inbox's display name.",
+                inputSchema: omitHostedInboxMetadataInput(tool.inputSchema),
+                outputSchema: omitMetadata(tool.outputSchema),
+            }
+        }
+        if (tool.name === 'get_inbox') {
+            return { ...tool, outputSchema: omitMetadata(tool.outputSchema) }
+        }
+        if (tool.name === 'list_inboxes') {
+            return {
+                ...tool,
+                outputSchema: {
+                    ...tool.outputSchema,
+                    inboxes: z.array(hostedInboxSchema),
+                },
+            }
+        }
+        return tool
+    })
 
 export function createMcpServer(auth: AuthSource): McpServer {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
@@ -412,6 +581,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     'Get an API key at https://console.agentmail.to.',
             },
         ],
+        isError: true,
     }
 
     for (const tool of STATIC_TOOLS) {
@@ -433,19 +603,16 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 const realToolkit = new AgentMailToolkit(client)
                 const realTool = realToolkit.getTools().find((t) => t.name === tool.name)
                 if (!realTool) {
-                    return {
-                        content: [{ type: 'text' as const, text: `Tool ${tool.name} not found in toolkit` }],
-                        isError: true,
-                    }
+                    return publicToolFailure(
+                        `tool ${tool.name}`,
+                        new Error(`Tool ${tool.name} not found in toolkit`)
+                    )
                 }
-                return realTool.callback(args, extra)
+                const result = await realTool.callback(args, extra)
+                if (result.isError) return publicToolFailure(`tool ${tool.name}`, result)
+                return sanitizeHostedToolResult(tool.name, result)
             } catch (error) {
-                const message = error instanceof Error ? error.message : String(error)
-                console.error(`[mcp] tool ${tool.name} failed:`, error)
-                return {
-                    content: [{ type: 'text' as const, text: `Error: ${message}` }],
-                    isError: true,
-                }
+                return publicToolFailure(`tool ${tool.name}`, error)
             }
         })
     }
@@ -466,7 +633,8 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 title: 'List organizations',
                 description:
                     'List the organizations you belong to and show which one is currently ' +
-                    'selected for AgentMail operations. Use `select_organization` to change it. ' +
+                    'effective for this AgentMail session. Use `select_organization` to change ' +
+                    'an unpinned session. ' +
                     'OAuth sessions only -- API-key requests return an error explaining that ' +
                     'organization selection does not apply to API-key authentication.',
                 outputSchema: {
@@ -496,8 +664,17 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     const memberships = await clerkClient.users.getOrganizationMembershipList({
                         userId: auth.clerkUserId,
                     })
-                    const selected = await getStoredMcpOrgId(auth.clerkUserId)
-                    const organizations = (memberships.data ?? []).map((m) => ({
+                    const membershipData = memberships.data ?? []
+                    const stored =
+                        auth.clerkOrgId || membershipData.length === 1
+                            ? undefined
+                            : await getStoredMcpOrgId(auth.clerkUserId)
+                    const selected = resolveEffectiveSelectedOrganizationId(
+                        auth.clerkOrgId,
+                        membershipData.map((m) => m.organization.id),
+                        stored
+                    )
+                    const organizations = membershipData.map((m) => ({
                         id: m.organization.id,
                         name: m.organization.name,
                         selected: m.organization.id === selected,
@@ -508,9 +685,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                         structuredContent,
                     }
                 } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error)
-                    console.error('[mcp] tool list_organizations failed:', error)
-                    return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+                    return publicToolFailure('tool list_organizations', error)
                 }
             }
         )
@@ -522,9 +697,10 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 description:
                     'Choose which organization your AgentMail operations target (for users who ' +
                     'belong to multiple orgs). Accepts an organization name or ID. The choice ' +
-                    'persists across sessions until you change it. OAuth sessions only -- API-key ' +
-                    'requests return an error explaining that organization selection does not ' +
-                    'apply to API-key authentication.',
+                    'persists across unpinned sessions until you change it. A session already ' +
+                    'pinned by OAuth must be reconnected to change organizations. OAuth sessions ' +
+                    'only -- API-key requests return an error explaining that organization ' +
+                    'selection does not apply to API-key authentication.',
                 inputSchema: {
                     organization: z
                         .string()
@@ -562,17 +738,31 @@ export function createMcpServer(auth: AuthSource): McpServer {
                         const orgList = (memberships.data ?? [])
                             .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                             .join('\n')
-                        return {
-                            content: [
-                                {
-                                    type: 'text' as const,
-                                    text: `No organization matching "${organization}". You belong to:\n${orgList}`,
-                                },
-                            ],
-                            isError: true,
-                        }
+                        return publicToolFailure(
+                            'tool select_organization',
+                            new ActionableToolError(
+                                INVALID_ORG_SELECTION_MESSAGE,
+                                `No organization matching "${organization}". Available organizations:\n${orgList}`
+                            )
+                        )
                     }
-                    await setStoredMcpOrgId(auth.clerkUserId, match.organization.id)
+                    if (
+                        conflictsWithPinnedOrganization(
+                            auth.clerkOrgId,
+                            match.organization.id
+                        )
+                    ) {
+                        return publicToolFailure(
+                            'tool select_organization',
+                            new ActionableToolError(
+                                PINNED_ORG_SELECTION_CONFLICT_MESSAGE,
+                                `Clerk user ${auth.clerkUserId} requested "${organization}" (${match.organization.id}) while the OAuth session is pinned to ${auth.clerkOrgId}`
+                            )
+                        )
+                    }
+                    if (!auth.clerkOrgId) {
+                        await setStoredMcpOrgId(auth.clerkUserId, match.organization.id)
+                    }
                     const structuredContent = {
                         organizationId: match.organization.id,
                         organizationName: match.organization.name,
@@ -582,9 +772,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                         structuredContent,
                     }
                 } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error)
-                    console.error('[mcp] tool select_organization failed:', error)
-                    return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+                    return publicToolFailure('tool select_organization', error)
                 }
             }
         )

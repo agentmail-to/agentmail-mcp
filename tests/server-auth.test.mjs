@@ -70,3 +70,20 @@ test('am_ API keys sent as Bearer tokens still route to the API-key path', async
   })
   assert.equal(res.status, 200)
 })
+
+test('OpenAI ownership challenge is served verbatim from the exact well-known route', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+
+  const response = await fetch(
+    `http://127.0.0.1:${port}/.well-known/openai-apps-challenge`,
+  )
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8')
+  assert.equal(
+    await response.text(),
+    'x5q5TTetk6mOB_sFlNKxXnvES1T8slSZXyWOL-T2b1s',
+  )
+})

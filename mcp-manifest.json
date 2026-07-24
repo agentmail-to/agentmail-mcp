@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:25908bd6aeeb5567547e34b0b336b41cff8eb68e67466e7082fedfe0d9d0cfa0",
+  "digest": "sha256:5234e99bcea8d93effdb02a5e50a3d60b0d0a92f6f264a467d9551dc25e1ccfa",
   "tools": [
     {
       "name": "list_inboxes",
@@ -58,26 +58,6 @@
                 "clientId": {
                   "type": "string"
                 },
-                "metadata": {
-                  "description": "Custom metadata attached to the inbox",
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "number"
-                      },
-                      {
-                        "type": "boolean"
-                      }
-                    ]
-                  }
-                },
                 "updatedAt": {
                   "type": "string",
                   "format": "date-time",
@@ -98,7 +78,7 @@
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -156,26 +136,6 @@
           "clientId": {
             "type": "string"
           },
-          "metadata": {
-            "description": "Custom metadata attached to the inbox",
-            "type": "object",
-            "propertyNames": {
-              "type": "string"
-            },
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ]
-            }
-          },
           "updatedAt": {
             "type": "string",
             "format": "date-time",
@@ -214,7 +174,7 @@
     {
       "name": "create_inbox",
       "title": "Create Inbox",
-      "description": "Create a new email inbox. Optionally specify username, domain, display name, and metadata.",
+      "description": "Create a new email inbox. Optionally specify username, domain, and display name.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -233,26 +193,6 @@
           "clientId": {
             "description": "Client-provided ID for idempotent creation",
             "type": "string"
-          },
-          "metadata": {
-            "description": "Custom metadata key-value pairs to attach to the inbox",
-            "type": "object",
-            "propertyNames": {
-              "type": "string"
-            },
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ]
-            }
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -274,26 +214,6 @@
           },
           "clientId": {
             "type": "string"
-          },
-          "metadata": {
-            "description": "Custom metadata attached to the inbox",
-            "type": "object",
-            "propertyNames": {
-              "type": "string"
-            },
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ]
-            }
           },
           "updatedAt": {
             "type": "string",
@@ -333,7 +253,7 @@
     {
       "name": "update_inbox",
       "title": "Update Inbox",
-      "description": "Update an inbox's display name or metadata. Metadata keys are merged; set a key to null to remove it, or set metadata to null to clear all.",
+      "description": "Update an inbox's display name.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -344,36 +264,6 @@
           "displayName": {
             "description": "Display name",
             "type": "string"
-          },
-          "metadata": {
-            "description": "Metadata to merge into existing metadata. Set a key to null to remove it, or the whole field to null to clear all metadata",
-            "anyOf": [
-              {
-                "type": "object",
-                "propertyNames": {
-                  "type": "string"
-                },
-                "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "boolean"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              {
-                "type": "null"
-              }
-            ]
           }
         },
         "required": [
@@ -398,26 +288,6 @@
           },
           "clientId": {
             "type": "string"
-          },
-          "metadata": {
-            "description": "Custom metadata attached to the inbox",
-            "type": "object",
-            "propertyNames": {
-              "type": "string"
-            },
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ]
-            }
           },
           "updatedAt": {
             "type": "string",
@@ -3273,65 +3143,9 @@
       "oauthOnly": false
     },
     {
-      "name": "auth_me",
-      "title": "Auth Me",
-      "description": "Get the identity and scope of the authenticated credential, including organization, pod, and inbox IDs.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "$schema": "http://json-schema.org/draft-07/schema#"
-      },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "scopeType": {
-            "type": "string",
-            "enum": [
-              "organization",
-              "pod",
-              "inbox"
-            ]
-          },
-          "scopeId": {
-            "type": "string"
-          },
-          "organizationId": {
-            "type": "string"
-          },
-          "podId": {
-            "type": "string"
-          },
-          "inboxId": {
-            "type": "string"
-          },
-          "apiKeyId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "scopeType",
-          "scopeId",
-          "organizationId"
-        ],
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false
-      },
-      "annotations": {
-        "title": "Auth Me",
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "execution": {
-        "taskSupport": "forbidden"
-      },
-      "oauthOnly": false
-    },
-    {
       "name": "list_organizations",
       "title": "List organizations",
-      "description": "List the organizations you belong to and show which one is currently selected for AgentMail operations. Use `select_organization` to change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
+      "description": "List the organizations you belong to and show which one is currently effective for this AgentMail session. Use `select_organization` to change an unpinned session. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
       "inputSchema": {
         "type": "object",
         "properties": {}
@@ -3384,7 +3198,7 @@
     {
       "name": "select_organization",
       "title": "Select organization",
-      "description": "Choose which organization your AgentMail operations target (for users who belong to multiple orgs). Accepts an organization name or ID. The choice persists across sessions until you change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
+      "description": "Choose which organization your AgentMail operations target (for users who belong to multiple orgs). Accepts an organization name or ID. The choice persists across unpinned sessions until you change it. A session already pinned by OAuth must be reconnected to change organizations. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
       "inputSchema": {
         "type": "object",
         "properties": {
