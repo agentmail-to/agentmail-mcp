@@ -153,16 +153,29 @@ type InternalOrganizationLookupDependencies = {
     retryDelaysMs: readonly number[]
 }
 
-const INTERNAL_ORG_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const
+export const INTERNAL_ORG_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 2_000] as const
+
+function isOrganizationMappingUnavailable(status: number, body: string): boolean {
+    // Compatibility with the previously deployed /internal-org behavior.
+    if (status === 403) return true
+    if (status !== 404) return false
+
+    try {
+        const error = JSON.parse(body) as { code?: unknown; message?: unknown }
+        return error.code === 'not_found' && error.message === 'Organization not found'
+    } catch {
+        return false
+    }
+}
 
 /**
  * Resolve AgentMail internal org id from a Clerk org id.
- * Mirrors console/app/lib/agentmail-jwt.server.ts getInternalOrganizationId.
+ * Mirrors console/app/lib/agentmail-jwt.server.ts lookupOrganization.
  *
  * Clerk emits organization.created asynchronously. A newly-created Clerk org
  * can therefore be visible to the MCP server shortly before the AgentMail
- * organization webhook has written its mapping. Retry only that expected
- * 403/404 window; other upstream failures still surface immediately.
+ * organization webhook has written its mapping. Retry only responses that
+ * identify that expected window; other upstream failures surface immediately.
  */
 export async function getInternalOrganizationId(
     clerkOrgId: string,
@@ -195,7 +208,7 @@ export async function getInternalOrganizationId(
         }
 
         const body = await response.text()
-        const retryable = response.status === 403 || response.status === 404
+        const retryable = isOrganizationMappingUnavailable(response.status, body)
         if (!retryable) {
             throw new Error(`/v0/auth/internal-org failed: ${response.status} ${body}`)
         }
@@ -280,12 +293,9 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  *      (e.g. delete_inbox) in the wrong org. Throw a clear error listing the
  *      orgs and telling the user to call `select_organization` first.
  *
- * Zero memberships is not handled here by design: Clerk's "create first
- * organization automatically" instance setting provisions every new user's
- * org during sign-up (enabled 2026-07-23), and pre-existing zero-org users
- * were backfilled (2026-07-24). The MCP server never creates organizations —
- * a reachable zero-org state means auto-create failed for that account, and
- * the console's sign-in flow is the repair path.
+ * Zero memberships is anomalous because Clerk normally creates a user's first
+ * organization during sign-up. The MCP server does not create organizations;
+ * users recover through the console's manual setup flow.
  *
  * This makes multi-org work for every client (Claude/Cursor/Codex) without
  * depending on the Clerk consent-screen org picker or per-client UA hacks.

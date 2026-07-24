@@ -3,7 +3,13 @@ import test from 'node:test'
 
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 
-const { getInternalOrganizationId } = await import('../packages/server/build/index.js')
+const { getInternalOrganizationId, INTERNAL_ORG_RETRY_DELAYS_MS } =
+  await import('../packages/server/build/index.js')
+
+test('default organization mapping retries span the first webhook redelivery', () => {
+  const totalDelay = INTERNAL_ORG_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+  assert.ok(totalDelay >= 5_000)
+})
 
 test('internal organization lookup waits for the Clerk webhook mapping', async () => {
   const statuses = [403, 404, 200]
@@ -21,7 +27,12 @@ test('internal organization lookup waits for the Clerk webhook mapping', async (
       fetchCalls += 1
       assert.equal(init.headers.Authorization, 'Bearer bootstrap-token')
       const status = statuses.shift()
-      return new Response(status === 200 ? JSON.stringify({ organization_id: 'internal_org' }) : '', {
+      const body = status === 200
+        ? JSON.stringify({ organization_id: 'internal_org' })
+        : status === 404
+          ? JSON.stringify({ code: 'not_found', message: 'Organization not found' })
+          : ''
+      return new Response(body, {
         status,
         headers: { 'content-type': 'application/json' },
       })
@@ -46,7 +57,10 @@ test('exhausted organization mapping retries return a retryable user-facing erro
       signToken: async () => 'bootstrap-token',
       fetcher: async () => {
         fetchCalls += 1
-        return new Response('mapping not found', { status: 404 })
+        return new Response(
+          JSON.stringify({ code: 'not_found', message: 'Organization not found' }),
+          { status: 404 },
+        )
       },
       sleep: async (ms) => waits.push(ms),
       retryDelaysMs: [100, 250],
@@ -56,6 +70,29 @@ test('exhausted organization mapping retries return a retryable user-facing erro
 
   assert.equal(fetchCalls, 3)
   assert.deepEqual(waits, [100, 250])
+})
+
+test('internal organization lookup does not retry unrelated 404 responses', async () => {
+  let fetchCalls = 0
+  await assert.rejects(
+    getInternalOrganizationId('org_missing_route', {
+      apiUrl: 'https://api.example.test',
+      signToken: async () => 'bootstrap-token',
+      fetcher: async () => {
+        fetchCalls += 1
+        return new Response(
+          JSON.stringify({ code: 'not_found', message: 'Route not found' }),
+          { status: 404 },
+        )
+      },
+      sleep: async () => {
+        throw new Error('must not wait')
+      },
+      retryDelaysMs: [100, 250],
+    }),
+    /\/v0\/auth\/internal-org failed: 404/,
+  )
+  assert.equal(fetchCalls, 1)
 })
 
 test('internal organization lookup does not retry unrelated upstream failures', async () => {
