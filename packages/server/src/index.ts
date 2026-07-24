@@ -263,136 +263,6 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
     })
 }
 
-type ClerkOrganization = {
-    id: string
-    name: string
-    publicMetadata: Record<string, unknown> | null
-}
-
-type ClerkOrganizationMembership = {
-    organization: ClerkOrganization
-}
-
-type ClerkOrganizationProvisioningDependencies = {
-    listMemberships: (clerkUserId: string) => Promise<ClerkOrganizationMembership[]>
-    getUser: (clerkUserId: string) => Promise<{ firstName: string | null }>
-    createOrganization: (params: {
-        name: string
-        createdBy: string
-        privateMetadata: Record<string, unknown>
-    }) => Promise<ClerkOrganization>
-    sleep: (ms: number) => Promise<void>
-    graceDelaysMs: readonly number[]
-}
-
-// Connector-first users have no browser bootstrap to wait for and pay this
-// entire sequence on their first operational call. Keep the grace window
-// short while still allowing a concurrently-loading console page to win.
-const ZERO_ORG_GRACE_DELAYS_MS = [250, 500, 1_000] as const
-
-// This is deliberately only a process-local single-flight. It collapses
-// parallel first calls handled by this Node process, but it is not a
-// distributed lock: separate server instances can still both create an
-// organization if their final membership reads race. Clerk has no
-// createOrganization idempotency key, so exact-once provisioning requires a
-// centralized AgentMail ensure operation or Clerk-managed automatic creation.
-const zeroOrgProvisioningByUser = new Map<string, Promise<ClerkOrganizationMembership[]>>()
-
-const defaultClerkProvisioningDependencies = (): ClerkOrganizationProvisioningDependencies => ({
-    listMemberships: async (clerkUserId) => {
-        const memberships = await clerkClient.users.getOrganizationMembershipList({
-            userId: clerkUserId,
-        })
-        return memberships.data as ClerkOrganizationMembership[]
-    },
-    getUser: async (clerkUserId) => {
-        const user = await clerkClient.users.getUser(clerkUserId)
-        return { firstName: user.firstName }
-    },
-    createOrganization: async (params) => {
-        const organization = await clerkClient.organizations.createOrganization(params)
-        return organization as ClerkOrganization
-    },
-    sleep,
-    graceDelaysMs: ZERO_ORG_GRACE_DELAYS_MS,
-})
-
-/**
- * Return the user's memberships, provisioning a personal organization when a
- * connector-first OAuth user genuinely has none.
- *
- * The grace polls give the normal browser-based console flow time to finish.
- * The per-user single-flight prevents simultaneous first tool calls in this
- * process from creating duplicate organizations. If another actor wins the
- * race while Clerk rejects our create, the final membership read recovers.
- */
-export async function getOrProvisionClerkMemberships(
-    clerkUserId: string,
-    dependencies: ClerkOrganizationProvisioningDependencies = defaultClerkProvisioningDependencies()
-): Promise<ClerkOrganizationMembership[]> {
-    const memberships = await dependencies.listMemberships(clerkUserId)
-    if (memberships.length > 0) return memberships
-
-    const existingProvisioning = zeroOrgProvisioningByUser.get(clerkUserId)
-    if (existingProvisioning) return existingProvisioning
-
-    const provisioning = (async () => {
-        for (const delayMs of dependencies.graceDelaysMs) {
-            await dependencies.sleep(delayMs)
-            const appeared = await dependencies.listMemberships(clerkUserId)
-            if (appeared.length > 0) return appeared
-        }
-
-        const user = await dependencies.getUser(clerkUserId)
-        const firstName = user.firstName?.trim() || 'My'
-
-        try {
-            const organization = await dependencies.createOrganization({
-                name: `${firstName}'s Organization`,
-                createdBy: clerkUserId,
-                privateMetadata: { agentmailProvisionedBy: 'mcp' },
-            })
-            console.info('[auth] provisioned Clerk organization for zero-org OAuth user', {
-                clerkUserId,
-                clerkOrganizationId: organization.id,
-            })
-            return [{ organization }]
-        } catch (error) {
-            // The browser console or another server may have created the org
-            // after our last read. Prefer the resulting membership over
-            // surfacing an otherwise harmless create race.
-            const appeared = await dependencies.listMemberships(clerkUserId)
-            if (appeared.length > 0) return appeared
-            throw error
-        }
-    })()
-
-    zeroOrgProvisioningByUser.set(clerkUserId, provisioning)
-    try {
-        return await provisioning
-    } finally {
-        if (zeroOrgProvisioningByUser.get(clerkUserId) === provisioning) {
-            zeroOrgProvisioningByUser.delete(clerkUserId)
-        }
-    }
-}
-
-/**
- * An explicit token org must be validated as-is. Provisioning a different
- * organization cannot make a stale or invalid org_id claim usable and would
- * turn a failed request into an unwanted write.
- */
-export async function getClerkMembershipsForRequest(
-    clerkUserId: string,
-    selectedClerkOrgId: string | undefined,
-    dependencies: ClerkOrganizationProvisioningDependencies = defaultClerkProvisioningDependencies()
-): Promise<ClerkOrganizationMembership[]> {
-    if (selectedClerkOrgId) {
-        return dependencies.listMemberships(clerkUserId)
-    }
-    return getOrProvisionClerkMemberships(clerkUserId, dependencies)
-}
-
 /**
  * Build an AgentMailClient backed by a console JWT for the user's selected org.
  *
@@ -401,16 +271,21 @@ export async function getClerkMembershipsForRequest(
  *      the user picked an org on the Clerk consent screen): use it. Validate
  *      membership defensively. Currently only Claude's privileged app can emit
  *      this; DCR clients never do (Clerk doesn't grant them user:org:read).
- *   2. Else if the user belongs to zero orgs: provision a personal org, wait
- *      for its AgentMail mapping, and use it.
- *   3. Else if the user belongs to exactly one org: use it (single-org users
+ *   2. Else if the user belongs to exactly one org: use it (single-org users
  *      never need to choose).
- *   4. Else (multi-org user) consult the org they picked via `select_organization`
+ *   3. Else (multi-org user) consult the org they picked via `select_organization`
  *      (stored in Clerk privateMetadata). If set and still a valid membership,
  *      use it.
- *   5. Else: refuse. Silently picking memberships[0] could land destructive ops
+ *   4. Else: refuse. Silently picking memberships[0] could land destructive ops
  *      (e.g. delete_inbox) in the wrong org. Throw a clear error listing the
  *      orgs and telling the user to call `select_organization` first.
+ *
+ * Zero memberships is not handled here by design: Clerk's "create first
+ * organization automatically" instance setting provisions every new user's
+ * org during sign-up (enabled 2026-07-23), and pre-existing zero-org users
+ * were backfilled (2026-07-24). The MCP server never creates organizations —
+ * a reachable zero-org state means auto-create failed for that account, and
+ * the console's sign-in flow is the repair path.
  *
  * This makes multi-org work for every client (Claude/Cursor/Codex) without
  * depending on the Clerk consent-screen org picker or per-client UA hacks.
@@ -419,12 +294,20 @@ async function buildClientFromClerkUser(
     clerkUserId: string,
     selectedClerkOrgId?: string
 ): Promise<AgentMailClient> {
-    const memberships = await getClerkMembershipsForRequest(clerkUserId, selectedClerkOrgId)
+    const memberships = await clerkClient.users.getOrganizationMembershipList({
+        userId: clerkUserId,
+    })
+    if (!memberships.data || memberships.data.length === 0) {
+        throw new Error(
+            'Your account has no AgentMail workspace yet. Sign in once at ' +
+                'https://console.agentmail.to to finish setup, then retry this tool.'
+        )
+    }
 
     let chosenOrg
     if (selectedClerkOrgId) {
         // Path 1: token specified an org. Validate membership before trusting it.
-        const matching = memberships.find(
+        const matching = memberships.data.find(
             (m) => m.organization.id === selectedClerkOrgId
         )
         if (!matching) {
@@ -434,22 +317,22 @@ async function buildClientFromClerkUser(
             )
         }
         chosenOrg = matching.organization
-    } else if (memberships.length === 1) {
+    } else if (memberships.data.length === 1) {
         // Path 2: single-org user. Safe to pick the only org.
-        chosenOrg = memberships[0]!.organization
+        chosenOrg = memberships.data[0]!.organization
     } else {
         // Path 3/4: multi-org user, no org_id in token. Use the org they picked
         // via `select_organization`; otherwise refuse and tell them to pick one.
         const storedOrgId = await getStoredMcpOrgId(clerkUserId)
         const matching = storedOrgId
-            ? memberships.find((m) => m.organization.id === storedOrgId)
+            ? memberships.data.find((m) => m.organization.id === storedOrgId)
             : undefined
         if (!matching) {
-            const orgList = memberships
+            const orgList = memberships.data
                 .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                 .join('\n')
             throw new Error(
-                `You belong to ${memberships.length} organizations and haven't selected one yet. ` +
+                `You belong to ${memberships.data.length} organizations and haven't selected one yet. ` +
                     `Call the \`select_organization\` tool with one of these, then retry:\n${orgList}`
             )
         }
