@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:61c307d233cfad695f17682c4d813f22ec2b7f419b594163e6b953cabd7e2ce4",
+  "digest": "sha256:b4ddde565ed29ab7389e3024cc5df1f2347408eb5c8dff3b9459de9131056f45",
   "tools": [
     {
       "name": "list_inboxes",
@@ -43,9 +43,6 @@
             "items": {
               "type": "object",
               "properties": {
-                "podId": {
-                  "type": "string"
-                },
                 "inboxId": {
                   "type": "string"
                 },
@@ -53,9 +50,6 @@
                   "type": "string"
                 },
                 "displayName": {
-                  "type": "string"
-                },
-                "clientId": {
                   "type": "string"
                 },
                 "metadata": {
@@ -92,13 +86,12 @@
                 }
               },
               "required": [
-                "podId",
                 "inboxId",
                 "email",
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -141,9 +134,6 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "podId": {
-            "type": "string"
-          },
           "inboxId": {
             "type": "string"
           },
@@ -151,9 +141,6 @@
             "type": "string"
           },
           "displayName": {
-            "type": "string"
-          },
-          "clientId": {
             "type": "string"
           },
           "metadata": {
@@ -190,7 +177,6 @@
           }
         },
         "required": [
-          "podId",
           "inboxId",
           "email",
           "updatedAt",
@@ -260,9 +246,6 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "podId": {
-            "type": "string"
-          },
           "inboxId": {
             "type": "string"
           },
@@ -270,9 +253,6 @@
             "type": "string"
           },
           "displayName": {
-            "type": "string"
-          },
-          "clientId": {
             "type": "string"
           },
           "metadata": {
@@ -309,7 +289,6 @@
           }
         },
         "required": [
-          "podId",
           "inboxId",
           "email",
           "updatedAt",
@@ -384,9 +363,6 @@
       "outputSchema": {
         "type": "object",
         "properties": {
-          "podId": {
-            "type": "string"
-          },
           "inboxId": {
             "type": "string"
           },
@@ -394,9 +370,6 @@
             "type": "string"
           },
           "displayName": {
-            "type": "string"
-          },
-          "clientId": {
             "type": "string"
           },
           "metadata": {
@@ -433,7 +406,6 @@
           }
         },
         "required": [
-          "podId",
           "inboxId",
           "email",
           "updatedAt",
@@ -667,7 +639,7 @@
                       "attachmentId",
                       "size"
                     ],
-                    "additionalProperties": {}
+                    "additionalProperties": false
                   }
                 },
                 "lastMessageId": {
@@ -705,7 +677,7 @@
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -863,7 +835,7 @@
                       "attachmentId",
                       "size"
                     ],
-                    "additionalProperties": {}
+                    "additionalProperties": false
                   }
                 },
                 "lastMessageId": {
@@ -886,6 +858,41 @@
                   "format": "date-time",
                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
                   "description": "ISO 8601 datetime"
+                },
+                "highlights": {
+                  "description": "Matched fragments per field, present when the query matched an indexed field",
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "Matched fragments from the sender address",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "recipients": {
+                      "description": "Matched fragments from recipient addresses",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "subject": {
+                      "description": "Matched fragments from the subject",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "text": {
+                      "description": "Matched fragments from the body",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -901,7 +908,7 @@
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -1025,7 +1032,7 @@
                 "attachmentId",
                 "size"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           },
           "lastMessageId": {
@@ -1130,7 +1137,7 @@
                       "attachmentId",
                       "size"
                     ],
-                    "additionalProperties": {}
+                    "additionalProperties": false
                   }
                 },
                 "inReplyTo": {
@@ -1139,15 +1146,6 @@
                 "references": {
                   "type": "array",
                   "items": {
-                    "type": "string"
-                  }
-                },
-                "headers": {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
                     "type": "string"
                   }
                 },
@@ -1197,7 +1195,7 @@
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             },
             "description": "Messages in thread, ordered by timestamp ascending"
           }
@@ -1290,11 +1288,7 @@
             "description": "Time at which the download URL expires"
           },
           "text": {
-            "description": "Extracted text (PDF/DOCX only, toolkit-added)",
-            "type": "string"
-          },
-          "extractionError": {
-            "description": "Set when PDF/DOCX text extraction failed or was skipped (toolkit-added)",
+            "description": "Extracted text (PDF/DOCX only, toolkit-added; absent when extraction was skipped or failed - see download URL)",
             "type": "string"
           }
         },
@@ -1605,7 +1599,7 @@
                       "attachmentId",
                       "size"
                     ],
-                    "additionalProperties": {}
+                    "additionalProperties": false
                   }
                 },
                 "inReplyTo": {
@@ -1614,15 +1608,6 @@
                 "references": {
                   "type": "array",
                   "items": {
-                    "type": "string"
-                  }
-                },
-                "headers": {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
                     "type": "string"
                   }
                 },
@@ -1654,7 +1639,7 @@
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -1812,7 +1797,7 @@
                       "attachmentId",
                       "size"
                     ],
-                    "additionalProperties": {}
+                    "additionalProperties": false
                   }
                 },
                 "inReplyTo": {
@@ -1821,15 +1806,6 @@
                 "references": {
                   "type": "array",
                   "items": {
-                    "type": "string"
-                  }
-                },
-                "headers": {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
                     "type": "string"
                   }
                 },
@@ -1847,6 +1823,41 @@
                   "format": "date-time",
                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
                   "description": "ISO 8601 datetime"
+                },
+                "highlights": {
+                  "description": "Matched fragments per field, present when the query matched an indexed field",
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "Matched fragments from the sender address",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "recipients": {
+                      "description": "Matched fragments from recipient addresses",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "subject": {
+                      "description": "Matched fragments from the subject",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "text": {
+                      "description": "Matched fragments from the body",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -1861,7 +1872,7 @@
                 "updatedAt",
                 "createdAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -1914,38 +1925,76 @@
             "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "filename": {
-                  "description": "Filename",
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string",
+                      "description": "Base64 encoded content"
+                    }
+                  },
+                  "required": [
+                    "content"
+                  ],
+                  "additionalProperties": false
                 },
-                "contentType": {
-                  "description": "MIME type of the attachment",
-                  "type": "string"
-                },
-                "contentDisposition": {
-                  "description": "Content disposition",
-                  "type": "string",
-                  "enum": [
-                    "inline",
-                    "attachment"
-                  ]
-                },
-                "contentId": {
-                  "description": "Content ID for inline attachments",
-                  "type": "string"
-                },
-                "content": {
-                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
-                  "type": "string"
-                },
-                "url": {
-                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
-                  "type": "string",
-                  "format": "uri"
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Publicly accessible URL to fetch the attachment from"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "additionalProperties": false
                 }
-              }
+              ],
+              "description": "Attachment: provide exactly one of content (base64) or url"
             }
           },
           "to": {
@@ -2046,38 +2095,76 @@
             "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "filename": {
-                  "description": "Filename",
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string",
+                      "description": "Base64 encoded content"
+                    }
+                  },
+                  "required": [
+                    "content"
+                  ],
+                  "additionalProperties": false
                 },
-                "contentType": {
-                  "description": "MIME type of the attachment",
-                  "type": "string"
-                },
-                "contentDisposition": {
-                  "description": "Content disposition",
-                  "type": "string",
-                  "enum": [
-                    "inline",
-                    "attachment"
-                  ]
-                },
-                "contentId": {
-                  "description": "Content ID for inline attachments",
-                  "type": "string"
-                },
-                "content": {
-                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
-                  "type": "string"
-                },
-                "url": {
-                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
-                  "type": "string",
-                  "format": "uri"
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Publicly accessible URL to fetch the attachment from"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "additionalProperties": false
                 }
-              }
+              ],
+              "description": "Attachment: provide exactly one of content (base64) or url"
             }
           },
           "messageId": {
@@ -2182,38 +2269,76 @@
             "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "filename": {
-                  "description": "Filename",
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string",
+                      "description": "Base64 encoded content"
+                    }
+                  },
+                  "required": [
+                    "content"
+                  ],
+                  "additionalProperties": false
                 },
-                "contentType": {
-                  "description": "MIME type of the attachment",
-                  "type": "string"
-                },
-                "contentDisposition": {
-                  "description": "Content disposition",
-                  "type": "string",
-                  "enum": [
-                    "inline",
-                    "attachment"
-                  ]
-                },
-                "contentId": {
-                  "description": "Content ID for inline attachments",
-                  "type": "string"
-                },
-                "content": {
-                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
-                  "type": "string"
-                },
-                "url": {
-                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
-                  "type": "string",
-                  "format": "uri"
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Publicly accessible URL to fetch the attachment from"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "additionalProperties": false
                 }
-              }
+              ],
+              "description": "Attachment: provide exactly one of content (base64) or url"
             }
           },
           "to": {
@@ -2387,38 +2512,76 @@
             "description": "Attachments. Each item must specify exactly one of content (base64) or url",
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "filename": {
-                  "description": "Filename",
-                  "type": "string"
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string",
+                      "description": "Base64 encoded content"
+                    }
+                  },
+                  "required": [
+                    "content"
+                  ],
+                  "additionalProperties": false
                 },
-                "contentType": {
-                  "description": "MIME type of the attachment",
-                  "type": "string"
-                },
-                "contentDisposition": {
-                  "description": "Content disposition",
-                  "type": "string",
-                  "enum": [
-                    "inline",
-                    "attachment"
-                  ]
-                },
-                "contentId": {
-                  "description": "Content ID for inline attachments",
-                  "type": "string"
-                },
-                "content": {
-                  "description": "Base64 encoded content. Exactly one of content or url must be provided",
-                  "type": "string"
-                },
-                "url": {
-                  "description": "Publicly accessible URL to fetch the attachment from. Exactly one of content or url must be provided",
-                  "type": "string",
-                  "format": "uri"
+                {
+                  "type": "object",
+                  "properties": {
+                    "filename": {
+                      "description": "Filename",
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "description": "MIME type of the attachment",
+                      "type": "string"
+                    },
+                    "contentDisposition": {
+                      "description": "Content disposition",
+                      "type": "string",
+                      "enum": [
+                        "inline",
+                        "attachment"
+                      ]
+                    },
+                    "contentId": {
+                      "description": "Content ID for inline attachments",
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Publicly accessible URL to fetch the attachment from"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "additionalProperties": false
                 }
-              }
+              ],
+              "description": "Attachment: provide exactly one of content (base64) or url"
             }
           },
           "to": {
@@ -2538,7 +2701,7 @@
                 "attachmentId",
                 "size"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           },
           "inReplyTo": {
@@ -2563,9 +2726,6 @@
             "format": "date-time",
             "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
             "description": "ISO 8601 datetime"
-          },
-          "clientId": {
-            "type": "string"
           },
           "replyTo": {
             "type": "array",
@@ -2743,7 +2903,7 @@
                       "attachmentId",
                       "size"
                     ],
-                    "additionalProperties": {}
+                    "additionalProperties": false
                   }
                 },
                 "inReplyTo": {
@@ -2776,7 +2936,7 @@
                 "labels",
                 "updatedAt"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           }
         },
@@ -2888,7 +3048,7 @@
                 "attachmentId",
                 "size"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           },
           "inReplyTo": {
@@ -2913,9 +3073,6 @@
             "format": "date-time",
             "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
             "description": "ISO 8601 datetime"
-          },
-          "clientId": {
-            "type": "string"
           },
           "replyTo": {
             "type": "array",
@@ -3097,7 +3254,7 @@
                 "attachmentId",
                 "size"
               ],
-              "additionalProperties": {}
+              "additionalProperties": false
             }
           },
           "inReplyTo": {
@@ -3122,9 +3279,6 @@
             "format": "date-time",
             "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
             "description": "ISO 8601 datetime"
-          },
-          "clientId": {
-            "type": "string"
           },
           "replyTo": {
             "type": "array",
