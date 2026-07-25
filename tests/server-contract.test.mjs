@@ -30,7 +30,9 @@ const coreTools = [
   'update_draft',
   'send_draft',
   'delete_draft',
-  'auth_me',
+  // auth_me is deliberately absent: excluded from the hosted catalog only
+  // (organization/pod/API-key identifiers are unnecessary on the OpenAI
+  // surface); it remains available in agentmail-toolkit for other consumers.
 ]
 const oauthTools = ['list_organizations', 'select_organization']
 

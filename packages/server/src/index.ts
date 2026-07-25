@@ -397,7 +397,12 @@ type AuthSource =
 // heap exhaustion. The real, per-auth client is still built inside the tool
 // callback at invocation time.
 const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeholder' }))
-const STATIC_TOOLS = staticToolkit.getTools()
+// auth_me is excluded from the HOSTED catalog only (it stays in the toolkit for
+// other integrations): it returns organization/pod/API-key identifiers, which
+// OpenAI app review treats as unnecessary internal identifiers on this surface —
+// disclosure cannot cure "unnecessary". Hosted sessions get org context via
+// list_organizations/select_organization instead.
+const STATIC_TOOLS = staticToolkit.getTools().filter((tool) => tool.name !== 'auth_me')
 
 export function createMcpServer(auth: AuthSource): McpServer {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
@@ -412,6 +417,9 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     'Get an API key at https://console.agentmail.to.',
             },
         ],
+        // isError so clients surface it as an actionable failure instead of a
+        // success payload that models may misread as tool output.
+        isError: true,
     }
 
     for (const tool of STATIC_TOOLS) {
@@ -496,8 +504,19 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     const memberships = await clerkClient.users.getOrganizationMembershipList({
                         userId: auth.clerkUserId,
                     })
-                    const selected = await getStoredMcpOrgId(auth.clerkUserId)
-                    const organizations = (memberships.data ?? []).map((m) => ({
+                    // Report the EFFECTIVE org, mirroring buildClientFromClerkUser's
+                    // precedence (token-pinned > single-org auto-pick > stored choice) —
+                    // previously only the stored choice was reported, so pinned and
+                    // single-org sessions showed nothing selected.
+                    const membershipData = memberships.data ?? []
+                    const stored =
+                        auth.clerkOrgId || membershipData.length === 1
+                            ? undefined
+                            : await getStoredMcpOrgId(auth.clerkUserId)
+                    const selected =
+                        auth.clerkOrgId ??
+                        (membershipData.length === 1 ? membershipData[0]!.organization.id : stored)
+                    const organizations = membershipData.map((m) => ({
                         id: m.organization.id,
                         name: m.organization.name,
                         selected: m.organization.id === selected,
@@ -522,9 +541,10 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 description:
                     'Choose which organization your AgentMail operations target (for users who ' +
                     'belong to multiple orgs). Accepts an organization name or ID. The choice ' +
-                    'persists across sessions until you change it. OAuth sessions only -- API-key ' +
-                    'requests return an error explaining that organization selection does not ' +
-                    'apply to API-key authentication.',
+                    'persists across unpinned sessions until you change it; a session already ' +
+                    'pinned to an organization by OAuth must be reconnected to change it. OAuth ' +
+                    'sessions only -- API-key requests return an error explaining that ' +
+                    'organization selection does not apply to API-key authentication.',
                 inputSchema: {
                     organization: z
                         .string()
@@ -572,7 +592,26 @@ export function createMcpServer(auth: AuthSource): McpServer {
                             isError: true,
                         }
                     }
-                    await setStoredMcpOrgId(auth.clerkUserId, match.organization.id)
+                    // A token-pinned session routes by its org_id claim regardless of the
+                    // stored choice (buildClientFromClerkUser path 1), so selecting a
+                    // DIFFERENT org would silently not take effect — refuse instead.
+                    // Selecting the already-pinned org is a truthful no-op.
+                    if (auth.clerkOrgId && auth.clerkOrgId !== match.organization.id) {
+                        return {
+                            content: [
+                                {
+                                    type: 'text' as const,
+                                    text:
+                                        'This OAuth session is pinned to a different organization. ' +
+                                        'Reconnect and choose the intended organization, then retry.',
+                                },
+                            ],
+                            isError: true,
+                        }
+                    }
+                    if (!auth.clerkOrgId) {
+                        await setStoredMcpOrgId(auth.clerkUserId, match.organization.id)
+                    }
                     const structuredContent = {
                         organizationId: match.organization.id,
                         organizationName: match.organization.name,
