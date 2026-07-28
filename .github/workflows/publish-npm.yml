@@ -1,6 +1,13 @@
 name: Publish npm bridge
 
 on:
+  # A merged version bump is the release intent, and it was already reviewed in
+  # the PR. 1.0.1 fixed a silent-startup regression and then waited a week for a
+  # human to remember this workflow; publishing on the bump removes that wait.
+  push:
+    branches: [main]
+    paths:
+      - packages/npm-stdio-bridge/package.json
   workflow_dispatch:
     inputs:
       version:
@@ -33,15 +40,50 @@ jobs:
           package-manager-cache: false
       - run: npm install --global npm@11.18.0
       - run: pnpm install --frozen-lockfile
-      - name: Verify release version
+      - name: Resolve release version
+        id: release
         env:
+          # Never interpolate a dispatch input straight into the shell.
           RELEASE_VERSION: ${{ inputs.version }}
-        run: test "$(node -p "require('./packages/npm-stdio-bridge/package.json').version")" = "$RELEASE_VERSION"
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./packages/npm-stdio-bridge/package.json').version")"
+          if [ -n "$RELEASE_VERSION" ] && [ "$RELEASE_VERSION" != "$version" ]; then
+            echo "requested $RELEASE_VERSION but package.json ships $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A push can touch package.json without bumping the version (a
+          # dependency or description edit). Publishing then fails the run on
+          # EPUBLISHCONFLICT and reds main for no reason, so skip instead.
+          if npm view "agentmail-mcp@$version" version >/dev/null 2>&1; then
+            echo "$version is already on npm; nothing to publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
       - run: pnpm --filter agentmail-mcp test
       - run: pnpm check:bridges
       - name: Inspect package artifact
+        if: steps.release.outputs.published != 'true'
         working-directory: packages/npm-stdio-bridge
         run: npm publish --dry-run --access public
       - name: Publish package
+        if: steps.release.outputs.published != 'true'
         working-directory: packages/npm-stdio-bridge
         run: npm publish --access public
+      - name: Smoke-test the published bridge
+        if: steps.release.outputs.published != 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # npm's CDN lags the publish by a few seconds.
+          for _ in $(seq 1 10); do
+            npm view "agentmail-mcp@$VERSION" version >/dev/null 2>&1 && break
+            sleep 5
+          done
+          unset AGENTMAIL_API_KEY
+          output="$(npx -y "agentmail-mcp@$VERSION" 2>&1 </dev/null || true)"
+          echo "$output"
+          # 1.0.0 exited 0 with no output through the bin symlink npx uses; the
+          # only proof the entrypoint runs is that it reaches its own argument check.
+          echo "$output" | grep -q 'AGENTMAIL_API_KEY is required'

@@ -1,6 +1,12 @@
 name: Publish PyPI
 
 on:
+  # Same reasoning as publish-npm.yml: the merged version bump is the release
+  # intent, already reviewed in the PR, so don't make a human remember to dispatch.
+  push:
+    branches: [main]
+    paths:
+      - python/stdio-bridge/pyproject.toml
   workflow_dispatch:
 
 concurrency:
@@ -13,10 +19,24 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.release.outputs.published }}
     steps:
       - name: Require main
         run: test "$GITHUB_REF" = refs/heads/main
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Resolve release version
+        id: release
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' python/stdio-bridge/pyproject.toml)"
+          [ -n "$version" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
+          # A push can edit pyproject.toml without bumping the version. PyPI
+          # rejects a re-upload, so skip rather than fail the run.
+          if curl -fsS "https://pypi.org/pypi/agentmail-mcp/$version/json" >/dev/null 2>&1; then
+            echo "$version is already on PyPI; nothing to publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: 0.11.28
@@ -33,6 +53,7 @@ jobs:
 
   publish:
     needs: build
+    if: needs.build.outputs.published != 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
