@@ -24,13 +24,17 @@ Configure it at <https://www.npmjs.com/package/agentmail-mcp/access>, or with np
 npm trust github agentmail-mcp --file publish-npm.yml --repo agentmail-to/agentmail-mcp --allow-publish -y
 ```
 
-After that external setup is confirmed, open the [Publish npm bridge workflow](https://github.com/agentmail-to/agentmail-mcp/actions/workflows/publish-npm.yml), choose **Run workflow** on the default branch, and enter the exact version from `packages/npm-stdio-bridge/package.json`. The workflow verifies that version, runs the bridge and boundary tests, performs an npm publish dry run, and then publishes with an OIDC identity. After it succeeds, smoke-test `npx -y agentmail-mcp@<version>` in a clean environment before advancing the cutover.
+After that external setup is confirmed, the workflow publishes automatically when a version bump to `packages/npm-stdio-bridge/package.json` merges to `main`. The merged bump is the release intent, and it was already reviewed in the PR. The workflow runs the bridge and boundary tests, performs an npm publish dry run, publishes with an OIDC identity, and then smoke-tests `npx -y agentmail-mcp@<version>` from a clean cache — asserting the entrypoint reaches its own argument check, because 1.0.0 exited 0 with no output through the bin symlink that `npx` uses. A push that edits `package.json` without changing the version is a no-op rather than a failure.
+
+To publish out of band, open the [Publish npm bridge workflow](https://github.com/agentmail-to/agentmail-mcp/actions/workflows/publish-npm.yml), choose **Run workflow** on the default branch, and enter the exact version from `packages/npm-stdio-bridge/package.json`; the workflow refuses to run if the two disagree.
+
+The daily `Public surfaces` audit backstops all of this: it fails when npm's or PyPI's `latest` disagrees with the version in the repo, catching a failed publish or a bridge that was bumped but never released.
 
 ## Human-gated cutover
 
 1. Repoint the existing production project to this repository and canary it.
 2. Promote only after health, authentication-characterization, and tool-contract checks pass.
-3. Publish npm with the manual trusted-publishing workflow above, then publish PyPI, and smoke-test clean installs.
+3. Merge the npm bridge version bump to publish it, then publish PyPI with its manual workflow, and smoke-test clean installs.
 4. Publish first-party docs and discovery changes.
 5. Repoint and authenticate a real call through Smithery.
 6. Publish Registry metadata and retire the duplicate identity.
