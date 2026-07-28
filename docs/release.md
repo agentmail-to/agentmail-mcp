@@ -43,13 +43,17 @@ Do not archive duplicate repositories until the production rollback window and S
 
 ## PyPI trusted publishing
 
-Before the first run, an AgentMail administrator must confirm project ownership and recovery access, enable 2FA, and add this repository's `publish-pypi.yml` workflow as a [PyPI Trusted Publisher](https://pypi.org/manage/project/agentmail-mcp/settings/publishing/). After npm `1.0.0` is healthy, dispatch the reviewed commit without adding an API token:
+Before the first run, an AgentMail administrator must confirm project ownership and recovery access, enable 2FA, and add this repository's `publish-pypi.yml` workflow as a [PyPI Trusted Publisher](https://pypi.org/manage/project/agentmail-mcp/settings/publishing/). No API token is needed.
+
+After that, the workflow publishes automatically when a version bump to `python/stdio-bridge/pyproject.toml` merges to `main`. It builds both distributions, installs each into a clean virtualenv, runs the `agentmail-mcp` console script, and checks the installed metadata against the version in `pyproject.toml` before anything reaches PyPI. A push that edits `pyproject.toml` without changing the version skips publishing rather than failing on a rejected re-upload.
+
+To publish out of band, dispatch the reviewed commit:
 
 ```sh
 gh workflow run publish-pypi.yml --ref main
 ```
 
-After it succeeds, verify the registry artifact with `uvx --refresh --from agentmail-mcp==1.0.0 agentmail-mcp --help` before announcing support.
+After it succeeds, verify the registry artifact with `uvx --refresh --from agentmail-mcp==<version> agentmail-mcp --help` before announcing support.
 
 ## Rollback
 
