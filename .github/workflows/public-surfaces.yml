@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "17 15 * * 1"
+    - cron: "17 15 * * *"
   workflow_dispatch:
 
 jobs:
