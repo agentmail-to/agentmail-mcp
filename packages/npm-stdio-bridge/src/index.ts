@@ -16,10 +16,10 @@ import {
     type Progress,
 } from '@modelcontextprotocol/sdk/types.js'
 
-const VERSION = '1.0.1'
+const VERSION = '1.0.2'
 const ENDPOINT = new URL('https://mcp.agentmail.to/mcp')
-const BRIDGE_HEADER = 'node/1.0.1'
-const USER_AGENT = 'agentmail-mcp-node/1.0.1'
+const BRIDGE_HEADER = 'node/1.0.2'
+const USER_AGENT = 'agentmail-mcp-node/1.0.2'
 
 export function parseTools(args: string[]) {
     const index = args.indexOf('--tools')
@@ -78,6 +78,8 @@ export async function startBridge(remoteTransport: Transport, localTransport: Tr
         )
     })
 
+    server.onerror = (error) => console.error(`AgentMail MCP: stdio error: ${error.message}`)
+    client.onerror = (error) => console.error(`AgentMail MCP: hosted error: ${error.message}`)
     server.onclose = () => void client.close()
     client.onclose = () => void server.close()
     await client.connect(remoteTransport)

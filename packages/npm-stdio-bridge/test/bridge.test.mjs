@@ -41,6 +41,30 @@ test('does not open stdio when the hosted connection fails', async () => {
     assert.equal(localStarted, false)
 })
 
+test('reports hosted and stdio transport errors to stderr', async (t) => {
+    const [remoteServerTransport, bridgeRemoteTransport] = InMemoryTransport.createLinkedPair()
+    const [bridgeLocalTransport] = InMemoryTransport.createLinkedPair()
+    const remote = new Server({ name: 'remote', version: '1.0.0' }, { capabilities: { tools: {} } })
+    await remote.connect(remoteServerTransport)
+    await startBridge(bridgeRemoteTransport, bridgeLocalTransport)
+    t.after(() => remote.close())
+
+    const messages = []
+    const original = console.error
+    console.error = (message) => messages.push(message)
+    try {
+        bridgeRemoteTransport.onerror(new Error('hosted boom'))
+        bridgeLocalTransport.onerror(new Error('stdio boom'))
+    } finally {
+        console.error = original
+    }
+
+    assert.deepEqual(messages, [
+        'AgentMail MCP: hosted error: hosted boom',
+        'AgentMail MCP: stdio error: stdio boom',
+    ])
+})
+
 test('forwards the remote tool contract, calls, errors, progress, cancellation, and changes', async (t) => {
     const [remoteServerTransport, bridgeRemoteTransport] = InMemoryTransport.createLinkedPair()
     const [bridgeLocalTransport, localClientTransport] = InMemoryTransport.createLinkedPair()
