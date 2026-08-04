@@ -928,12 +928,15 @@ app.all('/', statelessMethodGuard, authRouter, mcpHandler)
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
     // Advertise the identity scopes supported by Clerk. `openid` is required
-    // by ChatGPT's OAuth client and must be included during DCR so Clerk allows
-    // it on the subsequent authorization request. We deliberately do NOT
-    // advertise `user:org:read`: Clerk grants dynamically-registered (DCR) clients only
-    // `email offline_access profile`, so any DCR client (Cursor, Codex, etc.)
-    // that requested the advertised user:org:read was rejected with
-    // invalid_scope at consent — broken OAuth onboarding since 2026-05-08.
+    // by ChatGPT's OAuth client. Some DCR clients omit `scope` when registering,
+    // so Clerk's instance-level DCR defaults must also include openid, email,
+    // and profile; otherwise the later authorization request fails with
+    // invalid_scope. Verify the Clerk setting with `pnpm check:oauth-config`.
+    //
+    // We deliberately do NOT advertise `user:org:read`: dynamically registered
+    // clients are not granted it by default, so advertising it caused clients
+    // (Cursor, Codex, etc.) to request a scope that Clerk rejected at consent —
+    // broken OAuth onboarding since 2026-05-08.
     //
     // Multi-org users no longer need the Clerk consent-screen org picker (which
     // required user:org:read): they pick their org in-session via the
