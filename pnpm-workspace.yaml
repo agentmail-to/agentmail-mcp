@@ -1,6 +1,16 @@
 packages:
   - packages/*
 
+# Both are transitive under @modelcontextprotocol/sdk and both patches sit inside the ranges its
+# deps already declare (ajv wants fast-uri ^3.0.1, express-rate-limit wants ip-address ^10.2.0),
+# so this pins the floor rather than forcing an incompatible version. Without it a future
+# lockfile refresh can resolve back down into the vulnerable range.
+#   fast-uri   <3.1.5   GHSA-7p8r-x3mc-p8w7  host confusion via backslash authority introducer
+#   ip-address <10.3.1  GHSA-mwp4-54f8-5fhr  leading-zero octet decoding, SSRF / trust-boundary bypass
+overrides:
+  fast-uri: ^3.1.5
+  ip-address: ^10.3.1
+
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - agentmail

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:b4ddde565ed29ab7389e3024cc5df1f2347408eb5c8dff3b9459de9131056f45",
+  "digest": "sha256:cc6205d6d5be72d88d155943ee924b2230a1fb89b517b02e0f81bd006bb43b1f",
   "tools": [
     {
       "name": "list_inboxes",
@@ -3419,6 +3419,49 @@
         "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "oauthOnly": false
+    },
+    {
+      "name": "agent_verify",
+      "title": "Agent Verify",
+      "description": "Verify an unverified agent organization using the 6-digit code emailed to the human who signed up, lifting the unverified plan's caps (1 inbox, 10 sends/day) at no cost. Call this when a plan-cap error tells you to verify — ask your human for the code from their email. The code expires after 24 hours and allows at most 10 attempts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "otpCode": {
+            "type": "string",
+            "description": "6-digit verification code emailed to the human who signed up"
+          }
+        },
+        "required": [
+          "otpCode"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "verified": {
+            "type": "boolean",
+            "description": "Whether the organization was verified"
+          }
+        },
+        "required": [
+          "verified"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Agent Verify",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
         "openWorldHint": false
       },
       "execution": {

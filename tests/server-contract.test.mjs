@@ -30,6 +30,13 @@ const coreTools = [
   'update_draft',
   'send_draft',
   'delete_draft',
+  // agent_verify is in the hosted catalog on purpose. An agent that signed up
+  // through /v0/agent/sign-up authenticates here with the key that call returned,
+  // and the API now answers its plan-cap errors with "ask your human for the code
+  // and call /v0/agent/verify" — a remedy it cannot perform without this tool. It
+  // takes an OTP code and returns { verified }, so the identifier concern that
+  // keeps auth_me out does not apply.
+  'agent_verify',
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
