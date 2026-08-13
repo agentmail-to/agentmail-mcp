@@ -7,9 +7,19 @@ packages:
 # lockfile refresh can resolve back down into the vulnerable range.
 #   fast-uri   <3.1.5   GHSA-7p8r-x3mc-p8w7  host confusion via backslash authority introducer
 #   ip-address <10.3.1  GHSA-mwp4-54f8-5fhr  leading-zero octet decoding, SSRF / trust-boundary bypass
+#
+# The hono pair is the same shape: the sdk declares hono ^4.11.4 and @hono/node-server ^1.19.9, so
+# both floors sit inside its ranges. @hono/node-server is loaded at runtime by the sdk's
+# streamableHttp transport, so these are in the deployed tree, not dev-only.
+#   hono              <4.12.34  GHSA-f23p-vx2j-j53r  memo() retains SSR output across requests
+#                               GHSA-54fx-42gc-7vw4  algorithmic-complexity DoS in language middleware
+#                               GHSA-8j4g-w8fx-2239  ReDoS in CORS middleware via ACRH
+#   @hono/node-server <1.19.15  GHSA-frvp-7c67-39w9  serve-static path traversal on Windows
 overrides:
   fast-uri: ^3.1.5
   ip-address: ^10.3.1
+  hono: ^4.12.34
+  '@hono/node-server': ^1.19.15
 
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:

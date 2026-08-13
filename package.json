@@ -12,14 +12,6 @@
         "test:python": "uv run --no-project --with ./python/stdio-bridge --with pytest pytest -q python/stdio-bridge/tests",
         "test": "pnpm check:contract && pnpm --filter agentmail-mcp test && node --test tests/*.test.mjs && pnpm test:python && pnpm check:bridges"
     },
-    "pnpm": {
-        "overrides": {
-            "@hono/node-server": "1.19.15",
-            "fast-uri": "^3.1.5",
-            "ip-address": "^10.3.1",
-            "hono": "4.12.34"
-        }
-    },
     "devDependencies": {
         "@modelcontextprotocol/sdk": "1.29.0"
     }
