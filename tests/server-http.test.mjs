@@ -12,7 +12,7 @@ test('health identifies the build and human MCP navigation redirects before auth
   const { port } = server.address()
 
   const health = await fetch(`http://127.0.0.1:${port}/health`)
-  const { heap, requests, ...healthRest } = await health.json()
+  const { heap, requests, sockets, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
     clerk_enabled: false,
@@ -31,6 +31,15 @@ test('health identifies the build and human MCP navigation redirects before auth
   assert.ok(requests.max_in_flight > 0)
   assert.ok(requests.max_event_loop_lag_ms > 0)
   assert.equal(typeof requests.shed_total, 'number')
+
+  // Socket telemetry is present even when the process is not listening (tests
+  // import the app without listening), so counters read zero. open_fds and
+  // max_fds come from /proc and are null where it does not exist (macOS).
+  assert.equal(typeof sockets.open_connections, 'number')
+  assert.equal(typeof sockets.accepted_total, 'number')
+  assert.equal(typeof sockets.client_errors_total, 'number')
+  assert.ok('open_fds' in sockets)
+  assert.ok('max_fds' in sockets)
 
   const redirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
     headers: { accept: 'text/html' },
