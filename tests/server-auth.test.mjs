@@ -34,7 +34,9 @@ test('malformed Authorization headers get a 401 challenge instead of crashing th
         'content-type': 'application/json',
         accept: 'application/json, text/event-stream',
       },
-      body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+      // Not `ping`: pings are answered by the fast path before auth runs, so
+      // they can no longer carry a malformed header into the guard at all.
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
     })
     assert.equal(res.status, 401, `expected 401 for header ${JSON.stringify(authorization)}`)
     assert.match(
@@ -44,6 +46,22 @@ test('malformed Authorization headers get a 401 challenge instead of crashing th
     )
     assert.deepEqual(await res.json(), { error: 'Unauthorized' })
   }
+
+  // A ping with the same malformed header is answered by the fast path with
+  // 200 — auth never sees it. This is the intended behavior change: the header
+  // shapes that once crash-looped production cannot even reach that code via
+  // ping anymore.
+  const pingRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer',
+      'content-type': 'application/json',
+      accept: 'application/json, text/event-stream',
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+  })
+  assert.equal(pingRes.status, 200)
+  assert.deepEqual(await pingRes.json(), { jsonrpc: '2.0', id: 1, result: {} })
 
   // The server is still alive and serving after the malformed requests.
   const health = await fetch(`http://127.0.0.1:${port}/health`)

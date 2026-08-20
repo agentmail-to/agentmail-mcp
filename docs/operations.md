@@ -96,3 +96,14 @@ quota freeze is invisible to the process and its logs; steal is the one number
 that separates "our code is slow" from "the host is withholding CPU". Sustained
 steal above 50% logs `[cpu] steal pressure` and means the machine size, not the
 code, is the constraint.
+
+## Ping fast path
+
+MCP `ping` (about two thirds of all traffic) is answered immediately after body
+parsing — before Clerk verification and before a per-request MCP server is
+built — as a plain `application/json` JSON-RPC response. This cuts the CPU cost
+of a ping from ~3.7 ms to ~0.05 ms, which matters on a CPU-quota-limited
+machine. Pings are deliberately not rate limited and need no credentials: a
+rejected or dropped ping makes clients tear down and re-initialize (three
+full-path requests, ~200x the cost of answering), so the answer itself is the
+cheapest defense. `requests.pings_fast_path` in `/health` counts them.

@@ -1336,6 +1336,7 @@ function admissionSlotOf(res: express.Response): AdmissionSlot | undefined {
 
 let inFlight = 0
 let shedTotal = 0
+let pingsFastPathed = 0
 // Log the transition, not the event: at overload the shed rate is exactly the
 // excess arrival rate, so per-request logging would itself become a load source.
 let shedding = false
@@ -1501,11 +1502,48 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // GET/DELETE, admissionControl caps concurrency, requestTimeout guarantees slots
 // come back, and only then does a request earn body parsing, Clerk
 // authentication, and a per-request MCP server.
+// ============================================================================
+// Ping fast path
+//
+// 67% of production traffic is MCP `ping` — a liveness probe whose only correct
+// answer is an empty result, promptly. On the full path each ping still paid
+// body parse + Clerk verification + a fresh McpServer with 26 registered tools
+// + SSE transport setup: ~3.7 ms of CPU for a reply that carries no data. On a
+// quota-throttled machine with a ~62 ms/s budget, pings alone consumed most of
+// the sustained capacity.
+//
+// Answering here, right after body parse, costs ~0.05 ms and is spec-correct:
+// Streamable HTTP allows a plain application/json JSON-RPC response, and ping's
+// result is always {}.
+//
+// Deliberately NOT rate-limited, and answered without auth. A ping is how
+// clients decide the server is alive; reject or drop one and the client tears
+// down and re-initializes — initialize + notifications/initialized + tools/list,
+// three full-path requests, ~200x the cost of answering. The answer itself is
+// the cheapest possible defense; genuine overload is already handled by
+// admissionControl upstream, which sheds everything alike. Skipping auth is the
+// point (verification is most of the per-ping cost) and leaks nothing — the
+// response is a constant. The one observable change: an unauthenticated ping
+// now gets 200 instead of the 401 challenge; real requests still 401.
+// ============================================================================
+
+const pingFastPath: express.RequestHandler = (req, res, next) => {
+    const body = req.body as unknown
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) return next()
+    const { method, id } = body as { method?: unknown; id?: unknown }
+    // id present = request (needs a response we can give); id absent = a
+    // notification, which the SDK answers with 202 — let it fall through.
+    if (method !== 'ping' || (typeof id !== 'string' && typeof id !== 'number')) return next()
+    pingsFastPathed++
+    res.status(200).json({ jsonrpc: '2.0', id, result: {} })
+}
+
 const mcpPipeline = [
     statelessMethodGuard,
     admissionControl,
     requestTimeout,
     parseJsonBody,
+    pingFastPath,
     clerkAuthBoundary,
     authRouter,
     mcpHandler,
@@ -1564,6 +1602,7 @@ app.get('/health', (_req, res) => {
             shed_total: shedTotal,
             event_loop_lag_ms: Math.round(recentLagMs),
             max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
+            pings_fast_path: pingsFastPathed,
         },
         // Where the queue is. Low in_flight + low lag + climbing latency means
         // the wait is upstream of the first middleware. If open_fds is near
