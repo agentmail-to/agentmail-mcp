@@ -25,3 +25,47 @@ Keep human GET navigation separate from MCP protocol traffic. Human pages may re
 The deployment provider is an implementation detail. Operational alerts and dashboards should identify the AgentMail hosted MCP, repository commit, and production project revision.
 
 Authentication hardening is a separate rollout. This migration preserves the current hosted inputs and observable behavior.
+
+## Overload protection
+
+The server sheds load instead of queueing it. Two independent triggers, either of
+which returns `503` with `Retry-After` before the request costs a per-request MCP
+server or a Clerk verification:
+
+- Event loop lag above `AGENTMAIL_MAX_EVENT_LOOP_LAG_MS` (default 500). This is
+  the primary trigger. Under saturation a request waits in the kernel and libuv
+  queues long before Express routes it, so an in-flight counter reads low while
+  real latency is already seconds — measuring the loop catches the backlog
+  wherever it sits.
+- In-flight requests at or above `AGENTMAIL_MAX_IN_FLIGHT` (default 256). A
+  secondary bound on the live set, since every in-flight request pins a whole
+  McpServer, transport, and req/res.
+
+Ordering matters as much as the limits. Clerk authentication and JSON body
+parsing are mounted *inside* the MCP pipeline, after the admission gate, not as
+globals. As globals every request paid both before it could be shed, which is the
+cost shedding exists to avoid and the cost that accumulates during a retry storm.
+
+`AGENTMAIL_REQUEST_TIMEOUT_MS` (default 30000) reclaims any request that would
+otherwise hold a slot indefinitely. Before headers go out it returns `504`. Once
+they have, it destroys the connection instead — `StreamableHTTPServerTransport`
+writes SSE headers before a `tools/call` handler settles, so every hung tool call
+is already past the point where a status can be sent, and a timeout that merely
+returned there would be a no-op for exactly the requests that need it.
+
+`AGENTMAIL_SHED_RETRY_AFTER_SECONDS` (default 2) sets the `Retry-After` value.
+
+A slot is held until the handler settles, not until the client disconnects, and
+the MCP request's abort signal is injected into the AgentMail SDK through a custom
+`fetch`. agentmail-toolkit does not forward `extra.signal`, so without that a
+client abort left the upstream HTTP request running to completion while the server
+reported zero in flight — letting timed-out clients rebuild unbounded background
+work behind a cap that looked healthy.
+
+Shedding is self-healing: it clears as soon as the next sample is under the
+limits, and logs only the transitions, never the individual sheds.
+
+Watch `requests` in `/health` — `in_flight`, `event_loop_lag_ms`, and `shed_total`.
+Note that `https://mcp.agentmail.to/health` is answered by the Manufact gateway and
+never reaches the app, so it stays green during an outage. Probe the app's own
+`/health` on the deployment's `.fly.dev` host, or an MCP `ping`, for real signal.
