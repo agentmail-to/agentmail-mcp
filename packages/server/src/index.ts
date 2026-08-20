@@ -45,6 +45,20 @@ import { z } from 'zod'
 // ============================================================================
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
+
+// Accept-queue depth. app.listen(port) with no backlog argument uses Node's
+// default of 511, which is the real cap regardless of the kernel's somaxconn.
+//
+// The 2026-08-20 outage was that cap overflowing. The Manufact/Fly proxy opens
+// one connection per request and drives bursts well past the steady ~95/s; when
+// a burst filled 511 in a single event-loop tick before the accept callback ran
+// again, the kernel dropped the completed handshakes (ListenOverflows tracked it
+// exactly, stepping 3378 → 4111 → 5729 during the incident), the proxy retried,
+// and every retried request waited seconds — all upstream of Express, with the
+// event loop near idle. Raising the backlog gives bursts somewhere to sit until
+// the loop drains them. Bounded by the VM's somaxconn (4096 on Fly); 2048 leaves
+// headroom without pretending the backlog can exceed what the kernel will honor.
+const LISTEN_BACKLOG = Math.max(128, parseInt(process.env.AGENTMAIL_LISTEN_BACKLOG || '', 10) || 2048)
 const DOCS_URL = 'https://docs.agentmail.to/integrations/mcp'
 const OPENAI_APPS_CHALLENGE_TOKEN = 'x5q5TTetk6mOB_sFlNKxXnvES1T8slSZXyWOL-T2b1s'
 
@@ -1191,6 +1205,38 @@ const TCP_SNMP_KEYS = ['ActiveOpens', 'PassiveOpens', 'AttemptFails', 'EstabRese
 const connectionHeaderSeen: Record<string, number> = {}
 const httpVersionSeen: Record<string, number> = {}
 
+// The one counter that made the outage legible: ListenOverflows is the kernel
+// dropping a completed handshake because the accept backlog was full. It is
+// silent — nothing in Node or the proxy logs it — so alert on any increase.
+// Log the transition into and out of overflow, not each drop, and report the
+// total dropped since it started so a burst is visible even after it clears.
+let listenOverflowBase: number | null = null
+let lastOverflow = 0
+let overflowing = false
+function sampleAcceptQueue() {
+    const ext = readProcTable('/proc/net/netstat', 'TcpExt', TCP_EXT_KEYS)
+    const overflows = ext?.ListenOverflows
+    if (overflows === undefined) return
+    if (listenOverflowBase === null) {
+        listenOverflowBase = overflows
+        lastOverflow = overflows
+        return
+    }
+    const dropped = overflows - lastOverflow
+    lastOverflow = overflows
+    if (dropped > 0 && !overflowing) {
+        overflowing = true
+        console.warn(
+            `[accept] backlog overflow: kernel dropped ${dropped} handshake(s) this interval ` +
+                `(${overflows - listenOverflowBase} since start, backlog ${LISTEN_BACKLOG}). ` +
+                `Connections are arriving faster than the event loop drains accept().`
+        )
+    } else if (dropped === 0 && overflowing) {
+        overflowing = false
+        console.warn(`[accept] backlog recovered (${overflows - listenOverflowBase} dropped total)`)
+    }
+}
+
 function kernelTcpSnapshot() {
     const sockstat = readProc('/proc/net/sockstat')
     const tcpLine = sockstat?.split('\n').find((l) => l.startsWith('TCP:'))
@@ -1544,23 +1590,38 @@ process.on('unhandledRejection', (reason) => {
     console.error('[fatal-contained] unhandled promise rejection:', reason)
 })
 
-if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
-    const server = app.listen(PORT, () => {
-    console.log(`AgentMail MCP server running on port ${PORT}`)
-    console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
-    console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
-    console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
-    console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
-    console.log('--- env var diagnostic ---')
-    console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
-    console.log(maskEnvVar('CLERK_SECRET_KEY'))
-    console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
-    console.log(maskEnvVar('AGENTMAIL_API_URL'))
-    console.log(maskEnvVar('AGENTMAIL_API_KEY'))
-    console.log(maskEnvVar('MCP_PUBLIC_URL'))
-    console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
-    console.log(`Kernel TCP: ${JSON.stringify(KERNEL)}`)
-    console.log('--------------------------')
+/**
+ * Bind the HTTP listener the way production does — with the explicit backlog —
+ * and wire the socket-level telemetry. Exported so tests exercise the real
+ * startup path (including LISTEN_BACKLOG) rather than an in-test app.listen
+ * whose own arguments would mask a regression; a revert to app.listen(PORT)
+ * changes the effective backlog this function produces, and the backlog test
+ * reads that from the kernel.
+ *
+ * `port` defaults to the configured PORT; tests pass 0 for an ephemeral port.
+ */
+export function startListening(port: number = PORT) {
+    // Options form so backlog is honored: @types/express omits the
+    // (port, backlog, callback) overload, but Express forwards an options
+    // object straight to http.Server.listen, which does accept { backlog }.
+    const server = app.listen({ port, backlog: LISTEN_BACKLOG }, () => {
+        const boundPort = (server.address() as { port: number } | null)?.port ?? port
+        console.log(`AgentMail MCP server running on port ${boundPort}`)
+        console.log(`MCP endpoints: http://localhost:${boundPort}/ and http://localhost:${boundPort}/mcp`)
+        console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
+        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
+        console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
+        console.log('--- env var diagnostic ---')
+        console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
+        console.log(maskEnvVar('CLERK_SECRET_KEY'))
+        console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
+        console.log(maskEnvVar('AGENTMAIL_API_URL'))
+        console.log(maskEnvVar('AGENTMAIL_API_KEY'))
+        console.log(maskEnvVar('MCP_PUBLIC_URL'))
+        console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
+        console.log(`Listen backlog: ${LISTEN_BACKLOG} (kernel somaxconn ${KERNEL.somaxconn ?? 'unknown'})`)
+        console.log(`Kernel TCP: ${JSON.stringify(KERNEL)}`)
+        console.log('--------------------------')
     })
 
     server.on('connection', () => {
@@ -1576,10 +1637,17 @@ if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
     server.on('clientError', () => {
         clientErrorsTotal++
     })
-    setInterval(() => {
+    const sampler = setInterval(() => {
         server.getConnections((err, count) => {
             if (!err) openConnections = count
         })
         sampleDescriptors()
-    }, 1000).unref()
+        sampleAcceptQueue()
+    }, 1000)
+    sampler.unref()
+    server.on('close', () => clearInterval(sampler))
+
+    return server
 }
+
+if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') startListening()
