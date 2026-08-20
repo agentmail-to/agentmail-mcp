@@ -15,6 +15,7 @@ const { app, admissionControl, requestTimeout } = await import('../packages/serv
 /** Minimal stand-in for an Express response: records what the middleware did. */
 function mockRes() {
     const res = new EventEmitter()
+    res.locals = {}
     res.statusCode = undefined
     res.headers = {}
     res.body = undefined

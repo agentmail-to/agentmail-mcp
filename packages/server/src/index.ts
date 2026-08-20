@@ -303,7 +303,8 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  */
 async function buildClientFromClerkUser(
     clerkUserId: string,
-    selectedClerkOrgId?: string
+    selectedClerkOrgId?: string,
+    signal?: AbortSignal
 ): Promise<AgentMailClient> {
     const memberships = await clerkClient.users.getOrganizationMembershipList({
         userId: clerkUserId,
@@ -362,18 +363,45 @@ async function buildClientFromClerkUser(
             ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
             : undefined,
         apiKey: consoleJwt,
+        fetch: fetchBoundTo(signal),
     })
+}
+
+/**
+ * Wrap fetch so every AgentMail request inherits the MCP request's cancellation.
+ *
+ * agentmail-toolkit does not forward `extra.signal` into the SDK, so without
+ * this a client that disconnects leaves its AgentMail HTTP request running to
+ * completion. That is invisible work: the connection is gone, nothing will read
+ * the response, and the retry the client just issued adds another one on top.
+ * Measured directly — after aborting a streamed tool call, the upstream socket
+ * stayed open indefinitely while the server reported zero in flight.
+ *
+ * The SDK takes a custom `fetch` at construction and we build a client per tool
+ * call, so injecting the signal here reaches every request the toolkit makes
+ * without the toolkit having to cooperate.
+ */
+function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined {
+    if (!signal) return undefined
+    return (input, init) => {
+        const callerSignal = init?.signal
+        return fetch(input, {
+            ...init,
+            signal: callerSignal ? AbortSignal.any([callerSignal, signal]) : signal,
+        })
+    }
 }
 
 /**
  * Build an AgentMailClient from a raw API key (legacy path).
  */
-function buildClientFromApiKey(apiKey: string): AgentMailClient {
+function buildClientFromApiKey(apiKey: string, signal?: AbortSignal): AgentMailClient {
     return new AgentMailClient({
         environment: AGENTMAIL_API_URL
             ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
             : undefined,
         apiKey,
+        fetch: fetchBoundTo(signal),
     })
 }
 
@@ -428,9 +456,13 @@ export function createMcpServer(auth: AuthSource): McpServer {
             try {
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
-                    client = await buildClientFromClerkUser(auth.clerkUserId, auth.clerkOrgId)
+                    client = await buildClientFromClerkUser(
+                        auth.clerkUserId,
+                        auth.clerkOrgId,
+                        extra?.signal
+                    )
                 } else if (auth.kind === 'apiKey') {
-                    client = buildClientFromApiKey(auth.apiKey)
+                    client = buildClientFromApiKey(auth.apiKey, extra?.signal)
                 } else {
                     return noAuthMessage
                 }
@@ -845,7 +877,7 @@ app.set('trust proxy', true)
 app.use(publicUrlOverride)
 
 app.use(cors({ exposedHeaders: ['WWW-Authenticate'] }))
-app.use(clerkAuthBoundary)
+
 // Match the AgentMail API's inbound ceiling exactly. The API runs on API
 // Gateway v2 (HTTP API), whose max request body is a hard, non-configurable
 // 10 MB (agentmail-api infra/core/gateway.ts uses apigatewayv2.Api with no
@@ -854,7 +886,18 @@ app.use(clerkAuthBoundary)
 // large tool calls before they reach the MCP handler; anything above 10 MB is
 // rejected downstream by API Gateway regardless, so matching is correct.
 const MAX_REQUEST_BODY = '10mb'
-app.use(express.json({ limit: MAX_REQUEST_BODY }))
+const parseJsonBody = express.json({ limit: MAX_REQUEST_BODY })
+
+// clerkAuthBoundary and body parsing are deliberately NOT app.use'd. As globals
+// they ran before the MCP routes, so a request paid Clerk authentication and up
+// to 10 MB of JSON parsing BEFORE admission control could see it — which is
+// exactly the cost a shed is supposed to avoid, and exactly the cost that
+// accumulates without bound during the retry storm this guards against. Both are
+// mounted inside the MCP pipeline below, after the admission gate.
+//
+// Nothing else needs them: /health and the openai-apps challenge read no body
+// and no auth, and the OAuth metadata handlers compose their response from the
+// publishable key and the request URL alone.
 
 // OpenAI app ownership verification. This token is public by design and must
 // be returned verbatim from the origin-root well-known URL.
@@ -949,6 +992,17 @@ setInterval(() => {
     loopDelay.reset()
 }, LAG_SAMPLE_INTERVAL_MS).unref()
 
+/**
+ * One admitted request's hold on the in-flight cap. `ownedByHandler` transfers
+ * responsibility for releasing it from the connection lifecycle to mcpHandler,
+ * so a client that walks away cannot free capacity that is still in use.
+ */
+type AdmissionSlot = { release: () => void; ownedByHandler: boolean }
+
+function admissionSlotOf(res: express.Response): AdmissionSlot | undefined {
+    return res.locals.admissionSlot as AdmissionSlot | undefined
+}
+
 let inFlight = 0
 let shedTotal = 0
 // Log the transition, not the event: at overload the shed rate is exactly the
@@ -983,25 +1037,47 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
         return
     }
 
-    inFlight++
-    // 'close' always fires, on clean finish and on client abort alike, so one
-    // listener covers both. Guard against a double release: Express can emit
-    // 'close' after 'finish', and releasing twice would let in-flight drift
-    // below zero, silently raising the effective cap.
+    // Guard against a double release: Express can emit 'close' after 'finish',
+    // and releasing twice would let in-flight drift below zero, silently
+    // raising the effective cap.
     let released = false
-    const release = () => {
-        if (released) return
-        released = true
-        inFlight--
-        if (shedding && !overloadReason()) {
-            shedding = false
-            console.warn(
-                `[admission] recovered: ${inFlight} in flight, ` +
-                    `${Math.round(recentLagMs)} ms loop lag, ${shedTotal} shed so far`
-            )
-        }
+    const slot: AdmissionSlot = {
+        ownedByHandler: false,
+        release: () => {
+            if (released) return
+            released = true
+            inFlight--
+            if (shedding && !overloadReason()) {
+                shedding = false
+                console.warn(
+                    `[admission] recovered: ${inFlight} in flight, ` +
+                        `${Math.round(recentLagMs)} ms loop lag, ${shedTotal} shed so far`
+                )
+            }
+        },
     }
-    res.on('close', release)
+    res.locals.admissionSlot = slot
+
+    // A client abort must NOT free the slot while the handler is still working.
+    // transport.close() only aborts the MCP-level signal; agentmail-toolkit
+    // ignores extra.signal, so the AgentMail HTTP request it started keeps
+    // running. Releasing on abort would let a timed-out client immediately retry
+    // into a fresh slot and stack a second live upstream call behind a cap that
+    // reads healthy — rebuilding exactly the unbounded background concurrency
+    // this is meant to bound.
+    //
+    // So 'close' only releases for requests that never reached mcpHandler (405,
+    // a 401 from authRouter, a body-parse failure). Once the handler takes
+    // ownership it releases in its own finally, and requestTimeout is the
+    // backstop for work that never settles at all.
+    res.on('close', () => {
+        if (!slot.ownedByHandler) slot.release()
+    })
+
+    // Counted last, once the release path is fully wired. Incrementing earlier
+    // means anything that throws in between leaks a slot permanently, and enough
+    // leaks silently pin the server in shedding with nothing actually running.
+    inFlight++
     next()
 }
 
@@ -1020,13 +1096,29 @@ const REQUEST_TIMEOUT_MS = Math.max(
 
 export const requestTimeout: express.RequestHandler = (req, res, next) => {
     const timer = setTimeout(() => {
-        if (res.headersSent) return
-        console.warn(`[timeout] request exceeded ${REQUEST_TIMEOUT_MS} ms, returning 504`)
-        res.status(504).json({
-            jsonrpc: '2.0',
-            error: { code: -32000, message: 'Request timed out' },
-            id: null,
-        })
+        if (!res.headersSent) {
+            console.warn(`[timeout] request exceeded ${REQUEST_TIMEOUT_MS} ms, returning 504`)
+            res.status(504).json({
+                jsonrpc: '2.0',
+                error: { code: -32000, message: 'Request timed out' },
+                id: null,
+            })
+            return
+        }
+
+        // Headers are already out, so there is no status left to send — and
+        // returning here would make this timer a no-op for exactly the requests
+        // that need it most. StreamableHTTPServerTransport writes SSE headers
+        // before a tools/call handler settles, so every hung tool call lands in
+        // this branch: 'close' never fires on its own, the slot never comes
+        // back, and MAX_IN_FLIGHT hung calls would leave the server shedding
+        // permanently. Destroy the stream to force the connection down, and
+        // release explicitly rather than relying on teardown ordering.
+        console.warn(
+            `[timeout] streamed request exceeded ${REQUEST_TIMEOUT_MS} ms, destroying connection`
+        )
+        res.destroy()
+        admissionSlotOf(res)?.release()
     }, REQUEST_TIMEOUT_MS)
     // unref so a pending timer never holds the process open during shutdown.
     timer.unref()
@@ -1040,6 +1132,10 @@ export const requestTimeout: express.RequestHandler = (req, res, next) => {
 // are redirected to the docs above, all other GETs and DELETEs get a 405
 // from statelessMethodGuard.
 const mcpHandler: express.RequestHandler = async (req, res) => {
+    // Take the slot off the connection lifecycle: from here the request is only
+    // done when this handler settles, not when the client stops listening.
+    const slot = admissionSlotOf(res)
+    if (slot) slot.ownedByHandler = true
     try {
         const authSource = req.authSource ?? { kind: 'none' }
         const server = createMcpServer(authSource)
@@ -1056,6 +1152,9 @@ const mcpHandler: express.RequestHandler = async (req, res) => {
                 id: null,
             })
         }
+    } finally {
+        // Settled either way, so the capacity is genuinely free now.
+        slot?.release()
     }
 }
 
@@ -1066,11 +1165,20 @@ app.get(['/', '/mcp'], (req, res, next) => {
     res.redirect(302, DOCS_URL)
 })
 
-// MCP endpoints. statelessMethodGuard sheds GET/DELETE, admissionControl caps
-// concurrency and sheds the excess, requestTimeout guarantees slots come back,
-// then authRouter decides OAuth vs API key for the POSTs that remain. Auth runs
-// last on purpose: a shed request must not cost a Clerk token verification.
-const mcpPipeline = [statelessMethodGuard, admissionControl, requestTimeout, authRouter, mcpHandler]
+// MCP endpoints, ordered cheapest-first so an overloaded server spends as little
+// as possible on a request it is about to reject: statelessMethodGuard sheds
+// GET/DELETE, admissionControl caps concurrency, requestTimeout guarantees slots
+// come back, and only then does a request earn body parsing, Clerk
+// authentication, and a per-request MCP server.
+const mcpPipeline = [
+    statelessMethodGuard,
+    admissionControl,
+    requestTimeout,
+    parseJsonBody,
+    clerkAuthBoundary,
+    authRouter,
+    mcpHandler,
+]
 app.all('/mcp', ...mcpPipeline)
 app.all('/', ...mcpPipeline)
 
