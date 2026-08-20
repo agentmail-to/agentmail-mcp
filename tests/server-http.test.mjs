@@ -12,7 +12,7 @@ test('health identifies the build and human MCP navigation redirects before auth
   const { port } = server.address()
 
   const health = await fetch(`http://127.0.0.1:${port}/health`)
-  const { heap, requests, sockets, ...healthRest } = await health.json()
+  const { heap, requests, sockets, tcp, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
     clerk_enabled: false,
@@ -40,6 +40,12 @@ test('health identifies the build and human MCP navigation redirects before auth
   assert.equal(typeof sockets.client_errors_total, 'number')
   assert.ok('open_fds' in sockets)
   assert.ok('max_fds' in sockets)
+
+  // Kernel TCP counters come from /proc and are null where it does not exist
+  // (macOS); the shape is always present so dashboards can rely on it.
+  for (const k of ['sockstat', 'port', 'tcp', 'tcp_ext', 'kernel', 'connection_header', 'http_version']) {
+    assert.ok(k in tcp, `tcp.${k}`)
+  }
 
   const redirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
     headers: { accept: 'text/html' },

@@ -1060,6 +1060,152 @@ function sampleDescriptors() {
     }
 }
 
+// ============================================================================
+// Kernel TCP telemetry
+//
+// With #44 deployed the picture sharpened: at the moment latency rose, the
+// accept rate fell from ~95/s to ~45/s while open_fds sat at 30 of 10240,
+// open_connections at 4-7, and the loop stayed near idle. Node is not failing
+// to accept; fewer connections are reaching accept(). That narrows the gap to
+// two layers: the proxy, and this VM's own kernel. The kernel is the last layer
+// we have not looked at and the last one that is ours to tune, so expose what it
+// knows. Everything below is read from /proc, needs no privileges, and costs
+// microseconds.
+//
+//   listen.accept_queue   connections accepted by the kernel, not yet by Node.
+//                         High here with an idle loop would be the one case
+//                         where the stall IS in this process.
+//   sockets.time_wait     who actively closes. ~rate*60s here means we do and
+//                         the TIME_WAIT cost is on our side of the link.
+//   tcp_ext.*             ListenOverflows / ListenDrops = accept backlog full;
+//                         PAWSPassive = SYNs refused on a recycled 4-tuple;
+//                         TCPTimeWaitOverflow = tw bucket table full.
+//   requests.connection_header  whether the proxy asks for close or keep-alive,
+//                         which decides whether reuse is even on the table.
+// ============================================================================
+
+function readProc(path: string): string | undefined {
+    try {
+        return fs.readFileSync(path, 'utf8')
+    } catch {
+        return undefined
+    }
+}
+
+/** "Tcp: A B C\nTcp: 1 2 3" style tables in /proc/net/snmp and /proc/net/netstat. */
+function readProcTable(path: string, prefix: string, keys: readonly string[]): Record<string, number> | null {
+    const text = readProc(path)
+    if (!text) return null
+    const lines = text.split('\n').filter((l) => l.startsWith(prefix + ':'))
+    if (lines.length < 2) return null
+    const names = lines[0]!.split(/\s+/).slice(1)
+    const values = lines[1]!.split(/\s+/).slice(1)
+    const out: Record<string, number> = {}
+    for (const k of keys) {
+        const i = names.indexOf(k)
+        if (i !== -1) out[k] = Number(values[i])
+    }
+    return out
+}
+
+const TCP_STATES: Record<string, string> = {
+    '01': 'established',
+    '02': 'syn_sent',
+    '03': 'syn_recv',
+    '04': 'fin_wait1',
+    '05': 'fin_wait2',
+    '06': 'time_wait',
+    '07': 'close',
+    '08': 'close_wait',
+    '09': 'last_ack',
+    '0A': 'listen',
+    '0B': 'closing',
+}
+
+/** Per-state socket counts on our port, plus the listen socket's accept queue. */
+function readPortSockets(port: number) {
+    const hexPort = port.toString(16).toUpperCase().padStart(4, '0')
+    const states: Record<string, number> = {}
+    let acceptQueue: number | null = null
+    let backlogMax: number | null = null
+    for (const path of ['/proc/net/tcp', '/proc/net/tcp6']) {
+        const text = readProc(path)
+        if (!text) continue
+        for (const line of text.split('\n').slice(1)) {
+            const cols = line.trim().split(/\s+/)
+            if (cols.length < 5) continue
+            const local = cols[1]!
+            if (!local.endsWith(':' + hexPort)) continue
+            const st = cols[3]!
+            const name = TCP_STATES[st] ?? st
+            states[name] = (states[name] ?? 0) + 1
+            if (st === '0A') {
+                // For LISTEN sockets the kernel reports rx_queue = current
+                // accept-queue depth and tx_queue = configured backlog.
+                const [tx, rx] = cols[4]!.split(':')
+                acceptQueue = parseInt(rx!, 16)
+                backlogMax = parseInt(tx!, 16)
+            }
+        }
+    }
+    return { states, acceptQueue, backlogMax }
+}
+
+function readSysctl(name: string): number | null {
+    const v = readProc('/proc/sys/' + name)
+    return v ? Number(v.trim()) : null
+}
+
+// Fixed for the life of the VM — read once, reported for context.
+const KERNEL = {
+    somaxconn: readSysctl('net/core/somaxconn'),
+    tcp_max_tw_buckets: readSysctl('net/ipv4/tcp_max_tw_buckets'),
+    tcp_fin_timeout: readSysctl('net/ipv4/tcp_fin_timeout'),
+    tcp_tw_reuse: readSysctl('net/ipv4/tcp_tw_reuse'),
+    tcp_timestamps: readSysctl('net/ipv4/tcp_timestamps'),
+    ip_local_port_range: readProc('/proc/sys/net/ipv4/ip_local_port_range')?.trim().replace(/\s+/, '-') ?? null,
+}
+
+const TCP_EXT_KEYS = [
+    'ListenOverflows',
+    'ListenDrops',
+    'TCPBacklogDrop',
+    'TCPReqQFullDrop',
+    'TCPReqQFullDoCookies',
+    'TCPTimeWaitOverflow',
+    'TW',
+    'TWRecycled',
+    'TWKilled',
+    'PAWSPassive',
+    'PAWSEstab',
+    'TCPAbortOnClose',
+    'TCPAbortOnTimeout',
+    'TCPTimeouts',
+    'EmbryonicRsts',
+    'TCPSynRetrans',
+] as const
+const TCP_SNMP_KEYS = ['ActiveOpens', 'PassiveOpens', 'AttemptFails', 'EstabResets', 'CurrEstab', 'RetransSegs', 'InErrs', 'OutRsts'] as const
+
+// What the proxy asks for on each request. Sampled on every request, so it is
+// a running histogram rather than a one-shot.
+const connectionHeaderSeen: Record<string, number> = {}
+const httpVersionSeen: Record<string, number> = {}
+
+function kernelTcpSnapshot() {
+    const sockstat = readProc('/proc/net/sockstat')
+    const tcpLine = sockstat?.split('\n').find((l) => l.startsWith('TCP:'))
+    const m = tcpLine?.match(/inuse (\d+) orphan (\d+) tw (\d+) alloc (\d+)/)
+    return {
+        sockstat: m ? { inuse: +m[1]!, orphan: +m[2]!, time_wait: +m[3]!, alloc: +m[4]! } : null,
+        port: readPortSockets(PORT),
+        tcp: readProcTable('/proc/net/snmp', 'Tcp', TCP_SNMP_KEYS),
+        tcp_ext: readProcTable('/proc/net/netstat', 'TcpExt', TCP_EXT_KEYS),
+        kernel: KERNEL,
+        connection_header: connectionHeaderSeen,
+        http_version: httpVersionSeen,
+    }
+}
+
 /**
  * One admitted request's hold on the in-flight cap. `ownedByHandler` transfers
  * responsibility for releasing it from the connection lifecycle to mcpHandler,
@@ -1313,6 +1459,7 @@ app.get('/health', (_req, res) => {
             open_fds: readOpenFds() ?? null,
             max_fds: MAX_FDS ?? null,
         },
+        tcp: kernelTcpSnapshot(),
     })
 })
 
@@ -1412,11 +1559,17 @@ if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
     console.log(maskEnvVar('AGENTMAIL_API_KEY'))
     console.log(maskEnvVar('MCP_PUBLIC_URL'))
     console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
+    console.log(`Kernel TCP: ${JSON.stringify(KERNEL)}`)
     console.log('--------------------------')
     })
 
     server.on('connection', () => {
         acceptedTotal++
+    })
+    server.on('request', (req) => {
+        const c = (req.headers.connection ?? '(none)').toLowerCase()
+        connectionHeaderSeen[c] = (connectionHeaderSeen[c] ?? 0) + 1
+        httpVersionSeen[req.httpVersion] = (httpVersionSeen[req.httpVersion] ?? 0) + 1
     })
     // Parse errors and socket-level timeouts surface here, not in Express. A
     // climbing count means sockets are being torn down abnormally.
