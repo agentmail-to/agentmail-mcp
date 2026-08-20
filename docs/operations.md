@@ -69,3 +69,21 @@ Watch `requests` in `/health` — `in_flight`, `event_loop_lag_ms`, and `shed_to
 Note that `https://mcp.agentmail.to/health` is answered by the Manufact gateway and
 never reaches the app, so it stays green during an outage. Probe the app's own
 `/health` on the deployment's `.fly.dev` host, or an MCP `ping`, for real signal.
+
+## Accept backlog
+
+`app.listen` is given an explicit backlog (`AGENTMAIL_LISTEN_BACKLOG`, default 2048,
+bounded by the kernel's `somaxconn`). Node's default when the argument is omitted is
+511, and that 511 was the cap the 2026-08-20 outage overflowed: the Fly proxy opens
+one connection per request and drives bursts past the steady rate, a burst filled the
+queue in a single event-loop tick before the accept callback ran again, and the kernel
+dropped the completed handshakes. Those drops are silent — nothing in Node or the proxy
+logs them — and the proxy's retries showed up only as multi-second latency on requests
+that had not yet reached Express.
+
+The signal is `tcp.tcp_ext.ListenOverflows` in `/health` (equal to `ListenDrops`); any
+increase is dropped connections. The server logs `[accept] backlog overflow` on the
+transition and `sockets.accepted_total` / `tcp.port.acceptQueue` show the pressure.
+If overflows persist at a raised backlog, the burst rate exceeds what one machine can
+accept and the levers are reducing per-request work on the accept path and horizontal
+scale.
