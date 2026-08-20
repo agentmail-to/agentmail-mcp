@@ -87,3 +87,12 @@ transition and `sockets.accepted_total` / `tcp.port.acceptQueue` show the pressu
 If overflows persist at a raised backlog, the burst rate exceeds what one machine can
 accept and the levers are reducing per-request work on the accept path and horizontal
 scale.
+
+## CPU steal
+
+`/health` reports `cpu.steal_pct` — the share of the last second the hypervisor
+refused to schedule this vCPU, from `/proc/stat`. On a shared-CPU machine the
+quota freeze is invisible to the process and its logs; steal is the one number
+that separates "our code is slow" from "the host is withholding CPU". Sustained
+steal above 50% logs `[cpu] steal pressure` and means the machine size, not the
+code, is the constraint.

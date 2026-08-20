@@ -12,7 +12,7 @@ test('health identifies the build and human MCP navigation redirects before auth
   const { port } = server.address()
 
   const health = await fetch(`http://127.0.0.1:${port}/health`)
-  const { heap, requests, sockets, tcp, ...healthRest } = await health.json()
+  const { heap, requests, sockets, tcp, cpu, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
     clerk_enabled: false,
@@ -45,6 +45,13 @@ test('health identifies the build and human MCP navigation redirects before auth
   // (macOS); the shape is always present so dashboards can rely on it.
   for (const k of ['sockstat', 'port', 'tcp', 'tcp_ext', 'kernel', 'connection_header', 'http_version']) {
     assert.ok(k in tcp, `tcp.${k}`)
+  }
+
+  // CPU steal comes from /proc/stat deltas computed by the 1 Hz sampler, which
+  // only runs when listening; here (and on macOS, where /proc is absent) the
+  // values are null but the shape is always present.
+  for (const k of ['steal_pct', 'busy_pct', 'idle_pct']) {
+    assert.ok(k in cpu, `cpu.${k}`)
   }
 
   const redirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
