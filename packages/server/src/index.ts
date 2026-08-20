@@ -1590,27 +1590,38 @@ process.on('unhandledRejection', (reason) => {
     console.error('[fatal-contained] unhandled promise rejection:', reason)
 })
 
-if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
+/**
+ * Bind the HTTP listener the way production does — with the explicit backlog —
+ * and wire the socket-level telemetry. Exported so tests exercise the real
+ * startup path (including LISTEN_BACKLOG) rather than an in-test app.listen
+ * whose own arguments would mask a regression; a revert to app.listen(PORT)
+ * changes the effective backlog this function produces, and the backlog test
+ * reads that from the kernel.
+ *
+ * `port` defaults to the configured PORT; tests pass 0 for an ephemeral port.
+ */
+export function startListening(port: number = PORT) {
     // Options form so backlog is honored: @types/express omits the
     // (port, backlog, callback) overload, but Express forwards an options
     // object straight to http.Server.listen, which does accept { backlog }.
-    const server = app.listen({ port: PORT, backlog: LISTEN_BACKLOG }, () => {
-    console.log(`AgentMail MCP server running on port ${PORT}`)
-    console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
-    console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
-    console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
-    console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
-    console.log('--- env var diagnostic ---')
-    console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
-    console.log(maskEnvVar('CLERK_SECRET_KEY'))
-    console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
-    console.log(maskEnvVar('AGENTMAIL_API_URL'))
-    console.log(maskEnvVar('AGENTMAIL_API_KEY'))
-    console.log(maskEnvVar('MCP_PUBLIC_URL'))
-    console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
-    console.log(`Listen backlog: ${LISTEN_BACKLOG} (kernel somaxconn ${KERNEL.somaxconn ?? 'unknown'})`)
-    console.log(`Kernel TCP: ${JSON.stringify(KERNEL)}`)
-    console.log('--------------------------')
+    const server = app.listen({ port, backlog: LISTEN_BACKLOG }, () => {
+        const boundPort = (server.address() as { port: number } | null)?.port ?? port
+        console.log(`AgentMail MCP server running on port ${boundPort}`)
+        console.log(`MCP endpoints: http://localhost:${boundPort}/ and http://localhost:${boundPort}/mcp`)
+        console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
+        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
+        console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
+        console.log('--- env var diagnostic ---')
+        console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
+        console.log(maskEnvVar('CLERK_SECRET_KEY'))
+        console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
+        console.log(maskEnvVar('AGENTMAIL_API_URL'))
+        console.log(maskEnvVar('AGENTMAIL_API_KEY'))
+        console.log(maskEnvVar('MCP_PUBLIC_URL'))
+        console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
+        console.log(`Listen backlog: ${LISTEN_BACKLOG} (kernel somaxconn ${KERNEL.somaxconn ?? 'unknown'})`)
+        console.log(`Kernel TCP: ${JSON.stringify(KERNEL)}`)
+        console.log('--------------------------')
     })
 
     server.on('connection', () => {
@@ -1626,11 +1637,17 @@ if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
     server.on('clientError', () => {
         clientErrorsTotal++
     })
-    setInterval(() => {
+    const sampler = setInterval(() => {
         server.getConnections((err, count) => {
             if (!err) openConnections = count
         })
         sampleDescriptors()
         sampleAcceptQueue()
-    }, 1000).unref()
+    }, 1000)
+    sampler.unref()
+    server.on('close', () => clearInterval(sampler))
+
+    return server
 }
+
+if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') startListening()
