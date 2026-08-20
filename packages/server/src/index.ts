@@ -36,6 +36,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
 import v8 from 'node:v8'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { z } from 'zod'
 
 // ============================================================================
@@ -888,6 +889,151 @@ const statelessMethodGuard: express.RequestHandler = (req, res, next) => {
         })
 }
 
+// ============================================================================
+// Admission control
+//
+// Every in-flight POST pins a whole per-request graph: a fresh McpServer with
+// all tools registered, a transport, and req/res. That is cheap in isolation
+// (~0.3 ms to build) and the box sustains hundreds of requests per second while
+// concurrency stays bounded. It stops being cheap when concurrency does not.
+//
+// The 2026-08-19 outage was that unbounded case. A latency blip pushed clients
+// into timeout-and-retry, retries raised concurrency, concurrency raised the
+// live set and GC cost, and the slower process produced more timeouts — a loop
+// that sustains itself at flat demand. Throughput fell from ~200 req/s to under
+// 10 while p50 passed 9 s, and it never recovered: redeploying onto a fresh
+// machine bought eight minutes before the retry backlog rebuilt the queue.
+// Capacity was never the limit — an idle machine on the same image serves 268
+// req/s against a 30-60 req/s demand — the missing piece was a ceiling.
+//
+// So we cap concurrency and shed the excess INSTANTLY. A fast 503 is strictly
+// better than a slow 200 here: it costs no per-request graph, it keeps the queue
+// short enough that admitted requests stay fast, and Retry-After pushes clients
+// into backoff instead of the tighter retry loop that a timeout provokes.
+// Shedding is what makes the feedback loop stop sustaining itself.
+//
+// Mounted after statelessMethodGuard (shed GETs must not consume a slot) and
+// before authRouter (a shed request must not cost a Clerk verification).
+// ============================================================================
+
+const MAX_IN_FLIGHT = Math.max(1, parseInt(process.env.AGENTMAIL_MAX_IN_FLIGHT || '', 10) || 256)
+const SHED_RETRY_AFTER_SECONDS = Math.max(
+    1,
+    parseInt(process.env.AGENTMAIL_SHED_RETRY_AFTER_SECONDS || '', 10) || 2
+)
+
+// Event loop lag is the signal that actually matches the observed failure, and
+// an in-flight counter alone would have missed it. When the loop is saturated a
+// request waits in the kernel and libuv queues LONG before Express routes it,
+// so by the time any middleware could increment a counter most of the latency
+// has already been spent — in-flight reads near zero while p50 is 9 s.
+// Measuring the loop catches the backlog wherever it sits, which is why this is
+// the primary trigger and the in-flight cap is only a secondary bound.
+//
+// Healthy lag here is single-digit to tens of milliseconds, so a mean of half a
+// second means the process is already deep in the queue-growth spiral.
+const MAX_EVENT_LOOP_LAG_MS = Math.max(
+    50,
+    parseInt(process.env.AGENTMAIL_MAX_EVENT_LOOP_LAG_MS || '', 10) || 500
+)
+const LAG_SAMPLE_INTERVAL_MS = 1000
+
+const loopDelay = monitorEventLoopDelay({ resolution: 20 })
+loopDelay.enable()
+let recentLagMs = 0
+// Mean over the window, not max: a single GC pause spikes max and would shed
+// traffic on a perfectly healthy server. Sustained saturation is what we react
+// to, and that is what shows up in the mean.
+setInterval(() => {
+    recentLagMs = loopDelay.mean / 1e6
+    loopDelay.reset()
+}, LAG_SAMPLE_INTERVAL_MS).unref()
+
+let inFlight = 0
+let shedTotal = 0
+// Log the transition, not the event: at overload the shed rate is exactly the
+// excess arrival rate, so per-request logging would itself become a load source.
+let shedding = false
+
+function overloadReason(): string | undefined {
+    if (recentLagMs > MAX_EVENT_LOOP_LAG_MS) {
+        return `event loop ${Math.round(recentLagMs)} ms behind (limit ${MAX_EVENT_LOOP_LAG_MS} ms)`
+    }
+    if (inFlight >= MAX_IN_FLIGHT) {
+        return `${inFlight} in flight at or above cap ${MAX_IN_FLIGHT}`
+    }
+    return undefined
+}
+
+export const admissionControl: express.RequestHandler = (req, res, next) => {
+    const reason = overloadReason()
+    if (reason) {
+        shedTotal++
+        if (!shedding) {
+            shedding = true
+            console.warn(`[admission] shedding: ${reason}`)
+        }
+        res.status(503)
+            .set('Retry-After', String(SHED_RETRY_AFTER_SECONDS))
+            .json({
+                jsonrpc: '2.0',
+                error: { code: -32000, message: 'Server overloaded, retry shortly' },
+                id: null,
+            })
+        return
+    }
+
+    inFlight++
+    // 'close' always fires, on clean finish and on client abort alike, so one
+    // listener covers both. Guard against a double release: Express can emit
+    // 'close' after 'finish', and releasing twice would let in-flight drift
+    // below zero, silently raising the effective cap.
+    let released = false
+    const release = () => {
+        if (released) return
+        released = true
+        inFlight--
+        if (shedding && !overloadReason()) {
+            shedding = false
+            console.warn(
+                `[admission] recovered: ${inFlight} in flight, ` +
+                    `${Math.round(recentLagMs)} ms loop lag, ${shedTotal} shed so far`
+            )
+        }
+    }
+    res.on('close', release)
+    next()
+}
+
+// A slot is only useful if it comes back. Two paths hold one open indefinitely:
+// a client that stops reading without resetting the connection, and the
+// contained-unhandled-rejection path above, where the request deliberately gets
+// no response. Without a ceiling those accumulate until the cap holds only dead
+// requests and every live one is shed — turning a slow outage into a total one.
+//
+// Ending the response makes 'close' fire, which releases the slot and runs the
+// same transport teardown as a client abort, reusing an already-exercised path.
+const REQUEST_TIMEOUT_MS = Math.max(
+    1000,
+    parseInt(process.env.AGENTMAIL_REQUEST_TIMEOUT_MS || '', 10) || 30_000
+)
+
+export const requestTimeout: express.RequestHandler = (req, res, next) => {
+    const timer = setTimeout(() => {
+        if (res.headersSent) return
+        console.warn(`[timeout] request exceeded ${REQUEST_TIMEOUT_MS} ms, returning 504`)
+        res.status(504).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Request timed out' },
+            id: null,
+        })
+    }, REQUEST_TIMEOUT_MS)
+    // unref so a pending timer never holds the process open during shutdown.
+    timer.unref()
+    res.on('close', () => clearTimeout(timer))
+    next()
+}
+
 // MCP request handler. We don't use streamableHttpHandler here because it
 // pre-binds an MCP server; we want to construct ours per-request based on
 // the resolved auth source. Only POST reaches this handler: text/html GETs
@@ -920,10 +1066,13 @@ app.get(['/', '/mcp'], (req, res, next) => {
     res.redirect(302, DOCS_URL)
 })
 
-// MCP endpoints. statelessMethodGuard sheds GET/DELETE, then authRouter
-// decides OAuth vs API key for the POSTs that remain.
-app.all('/mcp', statelessMethodGuard, authRouter, mcpHandler)
-app.all('/', statelessMethodGuard, authRouter, mcpHandler)
+// MCP endpoints. statelessMethodGuard sheds GET/DELETE, admissionControl caps
+// concurrency and sheds the excess, requestTimeout guarantees slots come back,
+// then authRouter decides OAuth vs API key for the POSTs that remain. Auth runs
+// last on purpose: a shed request must not cost a Clerk token verification.
+const mcpPipeline = [statelessMethodGuard, admissionControl, requestTimeout, authRouter, mcpHandler]
+app.all('/mcp', ...mcpPipeline)
+app.all('/', ...mcpPipeline)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
@@ -964,6 +1113,18 @@ app.get('/health', (_req, res) => {
             used_mb: Math.round(heapUsed / MB),
             limit_mb: Math.round(HEAP_LIMIT_BYTES / MB),
             rss_mb: Math.round(rss / MB),
+        },
+        // Concurrency, not memory, is what fails on this server. The Aug 19
+        // outage ran at a healthy 74-92 MB heap the whole time, so the heap
+        // block above stayed green while the queue was thousands deep. These
+        // are the leading indicators: event_loop_lag_ms approaching the limit
+        // is the collapse starting, a climbing shed_total is it in progress.
+        requests: {
+            in_flight: inFlight,
+            max_in_flight: MAX_IN_FLIGHT,
+            shed_total: shedTotal,
+            event_loop_lag_ms: Math.round(recentLagMs),
+            max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
         },
     })
 })

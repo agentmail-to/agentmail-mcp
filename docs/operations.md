@@ -25,3 +25,30 @@ Keep human GET navigation separate from MCP protocol traffic. Human pages may re
 The deployment provider is an implementation detail. Operational alerts and dashboards should identify the AgentMail hosted MCP, repository commit, and production project revision.
 
 Authentication hardening is a separate rollout. This migration preserves the current hosted inputs and observable behavior.
+
+## Overload protection
+
+The server sheds load instead of queueing it. Two independent triggers, either of
+which returns `503` with `Retry-After` before the request costs a per-request MCP
+server or a Clerk verification:
+
+- Event loop lag above `AGENTMAIL_MAX_EVENT_LOOP_LAG_MS` (default 500). This is
+  the primary trigger. Under saturation a request waits in the kernel and libuv
+  queues long before Express routes it, so an in-flight counter reads low while
+  real latency is already seconds — measuring the loop catches the backlog
+  wherever it sits.
+- In-flight requests at or above `AGENTMAIL_MAX_IN_FLIGHT` (default 256). A
+  secondary bound on the live set, since every in-flight request pins a whole
+  McpServer, transport, and req/res.
+
+`AGENTMAIL_REQUEST_TIMEOUT_MS` (default 30000) returns `504` and releases the slot
+for any request that would otherwise hold one indefinitely.
+`AGENTMAIL_SHED_RETRY_AFTER_SECONDS` (default 2) sets the `Retry-After` value.
+
+Shedding is self-healing: it clears as soon as the next sample is under the
+limits, and logs only the transitions, never the individual sheds.
+
+Watch `requests` in `/health` — `in_flight`, `event_loop_lag_ms`, and `shed_total`.
+Note that `https://mcp.agentmail.to/health` is answered by the Manufact gateway and
+never reaches the app, so it stays green during an outage. Probe the app's own
+`/health` on the deployment's `.fly.dev` host, or an MCP `ping`, for real signal.

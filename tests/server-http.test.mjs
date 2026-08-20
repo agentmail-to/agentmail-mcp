@@ -12,7 +12,7 @@ test('health identifies the build and human MCP navigation redirects before auth
   const { port } = server.address()
 
   const health = await fetch(`http://127.0.0.1:${port}/health`)
-  const { heap, ...healthRest } = await health.json()
+  const { heap, requests, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
     clerk_enabled: false,
@@ -23,6 +23,14 @@ test('health identifies the build and human MCP navigation redirects before auth
   assert.ok(heap.used_mb > 0)
   assert.ok(heap.limit_mb >= heap.used_mb)
   assert.ok(heap.rss_mb > 0)
+
+  // Concurrency is the failure mode this server actually has, so /health has to
+  // report it. /health is not part of the MCP pipeline and must never consume a
+  // slot itself, or the probe would distort the number it reports.
+  assert.equal(requests.in_flight, 0)
+  assert.ok(requests.max_in_flight > 0)
+  assert.ok(requests.max_event_loop_lag_ms > 0)
+  assert.equal(typeof requests.shed_total, 'number')
 
   const redirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
     headers: { accept: 'text/html' },
