@@ -1252,6 +1252,77 @@ function kernelTcpSnapshot() {
     }
 }
 
+// ============================================================================
+// CPU steal telemetry
+//
+// With the backlog fixed (#46) the collapse stopped (ListenOverflows frozen)
+// but the accept queue still sits hundreds deep and drains at ~46/s while the
+// event loop shows a sustained 88-120 ms lag at only ~17 req/s of mostly-ping
+// traffic. An idle machine on the identical image runs at 20 ms. Nothing in
+// the process accounts for that floor.
+//
+// The remaining suspect is the host: on a shared-CPU machine the hypervisor
+// enforces a quota (Fly shared-cpu-1x: ~6.25% of a core, granted 5 ms per
+// 80 ms period) and FREEZES the vCPU for the rest of the period once it is
+// spent. That freeze is invisible to the app and to its logs, but the kernel
+// counts it: the `steal` column of /proc/stat is time the guest was runnable
+// and the hypervisor did not schedule it. Steal at ~70-90% during an episode
+// confirms quota throttling; steal near zero refutes it. Either answer is
+// decisive, and this is the only place we can read it without access to the
+// provider's Fly org metrics.
+// ============================================================================
+
+type CpuTimes = { total: number; idle: number; iowait: number; steal: number }
+
+function readCpuTimes(): CpuTimes | undefined {
+    const text = readProc('/proc/stat')
+    if (!text) return undefined
+    const line = text.split('\n')[0]
+    if (!line?.startsWith('cpu ')) return undefined
+    // cpu  user nice system idle iowait irq softirq steal guest guest_nice
+    const f = line.trim().split(/\s+/).slice(1).map(Number)
+    const [user = 0, nice = 0, system = 0, idle = 0, iowait = 0, irq = 0, softirq = 0, steal = 0] = f
+    return { total: user + nice + system + idle + iowait + irq + softirq + steal, idle, iowait, steal }
+}
+
+let prevCpuTimes: CpuTimes | undefined
+const cpuPct: { steal_pct: number | null; busy_pct: number | null; idle_pct: number | null } = {
+    steal_pct: null,
+    busy_pct: null,
+    idle_pct: null,
+}
+// Transition-logged like the fd and accept-queue warnings: sustained steal is
+// the signal, and at 1 Hz sampling per-tick logging would flood under exactly
+// the condition being diagnosed.
+let stealPressure = false
+
+function sampleCpu() {
+    const cur = readCpuTimes()
+    if (!cur) return
+    if (prevCpuTimes) {
+        const dTotal = cur.total - prevCpuTimes.total
+        if (dTotal > 0) {
+            const steal = (100 * (cur.steal - prevCpuTimes.steal)) / dTotal
+            const idle = (100 * (cur.idle - prevCpuTimes.idle)) / dTotal
+            const iowait = (100 * (cur.iowait - prevCpuTimes.iowait)) / dTotal
+            cpuPct.steal_pct = Math.round(steal)
+            cpuPct.idle_pct = Math.round(idle)
+            cpuPct.busy_pct = Math.round(Math.max(0, 100 - idle - iowait - steal))
+            const pressured = steal > 50
+            if (pressured && !stealPressure) {
+                stealPressure = true
+                console.warn(
+                    `[cpu] steal pressure: hypervisor withheld ${Math.round(steal)}% of CPU this interval — quota throttling`
+                )
+            } else if (!pressured && stealPressure) {
+                stealPressure = false
+                console.warn(`[cpu] steal recovered: ${Math.round(steal)}%`)
+            }
+        }
+    }
+    prevCpuTimes = cur
+}
+
 /**
  * One admitted request's hold on the in-flight cap. `ownedByHandler` transfers
  * responsibility for releasing it from the connection lifecycle to mcpHandler,
@@ -1506,6 +1577,10 @@ app.get('/health', (_req, res) => {
             max_fds: MAX_FDS ?? null,
         },
         tcp: kernelTcpSnapshot(),
+        // Guest CPU accounting over the last ~1s sample. steal_pct is time the
+        // hypervisor refused to schedule this vCPU — the one number that
+        // separates "our code is slow" from "the host is withholding CPU".
+        cpu: cpuPct,
     })
 })
 
@@ -1643,6 +1718,7 @@ export function startListening(port: number = PORT) {
         })
         sampleDescriptors()
         sampleAcceptQueue()
+        sampleCpu()
     }, 1000)
     sampler.unref()
     server.on('close', () => clearInterval(sampler))
