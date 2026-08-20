@@ -37,6 +37,7 @@ import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
 import v8 from 'node:v8'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
+import fs from 'node:fs'
 import { z } from 'zod'
 
 // ============================================================================
@@ -992,6 +993,73 @@ setInterval(() => {
     loopDelay.reset()
 }, LAG_SAMPLE_INTERVAL_MS).unref()
 
+// ============================================================================
+// Socket & descriptor telemetry
+//
+// The 2026-08-20 follow-up showed the queue is NOT inside Node. On the
+// production machine a GET /mcp — answered 405 by the FIRST handler in the
+// pipeline, before admission, parsing, or auth — took 10-12 s, while event loop
+// lag sat at 20 ms and 0-2 requests were in flight; the idle sibling on the same
+// image answered in 0.13 s. So the wait is between the proxy handing us a
+// connection and our first line of code running. Two things can fill that gap,
+// and only one of them is ours to fix:
+//
+//   - Node cannot accept. When open descriptors hit the ulimit, accept() fails
+//     with EMFILE; libuv then accepts-and-closes to drain the backlog, the proxy
+//     sees resets and retries, and every request waits while the loop stays
+//     idle. open_fds approaching max_fds is the tell, and the fix is ours:
+//     hold fewer connections (keep-alive and header timeouts, maxConnections).
+//   - The proxy is queueing before it connects. Then connections and fds stay
+//     low here while latency climbs, and the lever is proxy concurrency and
+//     horizontal scale — not anything in this process.
+//
+// /health reports both so the next episode answers this in one request.
+// ============================================================================
+
+let openConnections = 0
+let acceptedTotal = 0
+let clientErrorsTotal = 0
+
+function readOpenFds(): number | undefined {
+    try {
+        return fs.readdirSync('/proc/self/fd').length
+    } catch {
+        return undefined
+    }
+}
+
+function readMaxFds(): number | 'unlimited' | undefined {
+    try {
+        // "Max open files            1024                 1048576              files"
+        const line = fs
+            .readFileSync('/proc/self/limits', 'utf8')
+            .split('\n')
+            .find((l) => l.startsWith('Max open files'))
+        const m = line?.match(/Max open files\s+(\d+|unlimited)/)
+        if (!m) return undefined
+        return m[1] === 'unlimited' ? 'unlimited' : parseInt(m[1]!, 10)
+    } catch {
+        return undefined
+    }
+}
+
+// The SOFT limit is what accept() enforces.
+const MAX_FDS = readMaxFds()
+// Transition-logged, same as shedding: at exhaustion every accept fails.
+let fdPressure = false
+function sampleDescriptors() {
+    const open = readOpenFds()
+    if (open === undefined || typeof MAX_FDS !== 'number') return
+    const pressured = open > MAX_FDS * 0.8
+    if (pressured && !fdPressure) {
+        fdPressure = true
+        console.warn(`[fds] pressure: ${open} open of ${MAX_FDS} (soft limit), ${openConnections} connections`)
+    } else if (!pressured && fdPressure) {
+        fdPressure = false
+        console.warn(`[fds] recovered: ${open} open of ${MAX_FDS}`)
+    }
+}
+
 /**
  * One admitted request's hold on the in-flight cap. `ownedByHandler` transfers
  * responsibility for releasing it from the connection lifecycle to mcpHandler,
@@ -1234,6 +1302,17 @@ app.get('/health', (_req, res) => {
             event_loop_lag_ms: Math.round(recentLagMs),
             max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
         },
+        // Where the queue is. Low in_flight + low lag + climbing latency means
+        // the wait is upstream of the first middleware. If open_fds is near
+        // max_fds the process cannot accept and the fix is ours; if both are
+        // low the proxy is queueing before it connects and the fix is not.
+        sockets: {
+            open_connections: openConnections,
+            accepted_total: acceptedTotal,
+            client_errors_total: clientErrorsTotal,
+            open_fds: readOpenFds() ?? null,
+            max_fds: MAX_FDS ?? null,
+        },
     })
 })
 
@@ -1318,7 +1397,8 @@ process.on('unhandledRejection', (reason) => {
     console.error('[fatal-contained] unhandled promise rejection:', reason)
 })
 
-if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') app.listen(PORT, () => {
+if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
+    const server = app.listen(PORT, () => {
     console.log(`AgentMail MCP server running on port ${PORT}`)
     console.log(`MCP endpoints: http://localhost:${PORT}/ and http://localhost:${PORT}/mcp`)
     console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
@@ -1331,5 +1411,22 @@ if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') app.listen(PORT, () => {
     console.log(maskEnvVar('AGENTMAIL_API_URL'))
     console.log(maskEnvVar('AGENTMAIL_API_KEY'))
     console.log(maskEnvVar('MCP_PUBLIC_URL'))
+    console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
     console.log('--------------------------')
-})
+    })
+
+    server.on('connection', () => {
+        acceptedTotal++
+    })
+    // Parse errors and socket-level timeouts surface here, not in Express. A
+    // climbing count means sockets are being torn down abnormally.
+    server.on('clientError', () => {
+        clientErrorsTotal++
+    })
+    setInterval(() => {
+        server.getConnections((err, count) => {
+            if (!err) openConnections = count
+        })
+        sampleDescriptors()
+    }, 1000).unref()
+}
