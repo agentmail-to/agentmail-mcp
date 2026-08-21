@@ -102,3 +102,19 @@ the kernel counters were the only place left to look and the answer was there.
   calls) and scale horizontally.
 - Point external monitoring at the app's own `/health` or an MCP `ping`, not the
   gateway `/health`, which cannot see an application-level outage.
+
+## Addendum (2026-08-20, later the same day): the layer beneath the backlog
+
+The backlog fix removed the collapse amplifier — `ListenOverflows` froze where
+it had been climbing by thousands — but baseline latency stayed at 5–20 s. The
+constraint beneath it was measured directly with CPU-steal telemetry
+(`/health.cpu`, from `/proc/stat`): on a fresh machine, at minute ~8, steal
+jumped from 1% to 46–63% while busy pinned at 4–5% — a shared-CPU machine's
+~6.25% quota being enforced after its burst balance drained. The arithmetic
+closes: ~3.7 ms CPU per request against a ~62 ms/s sustained budget is
+~17 req/s of capacity, exactly the observed plateau, and the burst-balance
+drain is why every fresh machine was healthy for ~8–14 minutes before
+degrading. Remedy is provider-side (dedicated-CPU machine, ≥2 machines; the
+hosting API exposes no size control). On our side, the ping fast path cuts
+per-request CPU for two thirds of traffic by ~70x, roughly doubling sustained
+capacity on the same quota.
