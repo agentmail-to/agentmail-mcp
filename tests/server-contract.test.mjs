@@ -47,13 +47,13 @@ const coreTools = [
   'list_providers',
   'search_providers',
   'get_provider',
-  'list_provider_connections',
-  'create_provider_connection',
+  'list_provider_accounts',
+  'connect_provider',
 ]
 const oauthTools = ['list_organizations', 'select_organization']
 // API-key-only at runtime: the API strictly re-authenticates the raw bearer as
 // an API key for this tool, so OAuth sessions are refused with a remedy.
-const apiKeyOnlyTools = ['create_provider_connection']
+const apiKeyOnlyTools = ['connect_provider']
 
 test('runtime manifest has the canonical tool contract exactly once', () => {
   const names = manifest.tools.map(({ name }) => name)

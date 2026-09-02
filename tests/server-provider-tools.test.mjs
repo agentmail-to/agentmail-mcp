@@ -44,28 +44,28 @@ const apiKeyAuth = { kind: 'apiKey', apiKey: 'am_test_key' }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
-const wireEntry = {
+const wireProvider = {
   provider_id: '11111111-1111-4111-8111-111111111111',
-  client_id: 'client-abc',
   name: 'Example RP',
   updated_at: '2026-08-30T00:00:00.000Z',
-  connected: true,
-  connectable: false,
-  logo_uri: 'https://cdn.example.test/logo.png',
+  description: 'An example provider',
+  logo_url: 'https://cdn.example.test/logo.png',
+  terms_url: 'https://example.test/terms',
+  privacy_url: 'https://example.test/privacy',
 }
 
-const camelEntry = {
-  providerId: wireEntry.provider_id,
-  clientId: wireEntry.client_id,
-  name: wireEntry.name,
-  updatedAt: wireEntry.updated_at,
-  connected: true,
-  connectable: false,
-  logoUri: wireEntry.logo_uri,
+const camelProvider = {
+  providerId: wireProvider.provider_id,
+  name: wireProvider.name,
+  updatedAt: wireProvider.updated_at,
+  description: wireProvider.description,
+  logoUrl: wireProvider.logo_url,
+  termsUrl: wireProvider.terms_url,
+  privacyUrl: wireProvider.privacy_url,
 }
 
 const accepted = {
-  enrollment_session_id: '33333333-3333-4333-8333-333333333333',
+  session_id: '33333333-3333-4333-8333-333333333333',
   magic_url: 'https://id.example.test/connect#token',
   expires_at: '2026-08-31T00:15:00.000Z',
 }
@@ -74,8 +74,8 @@ test('list_providers maps camelCase args to the wire query and republishes camel
   const { result, calls } = await callTool(
     apiKeyAuth,
     'list_providers',
-    { limit: 25, pageToken: 'tok123', connected: true },
-    () => json({ count: 1, limit: 25, next_page_token: 'tok456', truncated: true, providers: [wireEntry] }),
+    { limit: 25, pageToken: 'tok123' },
+    () => json({ count: 1, limit: 25, next_page_token: 'tok456', providers: [wireProvider] }),
   )
 
   assert.equal(calls.length, 1)
@@ -84,7 +84,6 @@ test('list_providers maps camelCase args to the wire query and republishes camel
   assert.equal(url.pathname, '/v0/providers')
   assert.equal(url.searchParams.get('limit'), '25')
   assert.equal(url.searchParams.get('page_token'), 'tok123')
-  assert.equal(url.searchParams.get('connected'), 'true')
   assert.equal(calls[0].init.headers.Authorization, 'Bearer am_test_key')
 
   assert.equal(result.isError, false)
@@ -92,8 +91,7 @@ test('list_providers maps camelCase args to the wire query and republishes camel
     count: 1,
     limit: 25,
     nextPageToken: 'tok456',
-    truncated: true,
-    providers: [camelEntry],
+    providers: [camelProvider],
   })
 })
 
@@ -102,36 +100,49 @@ test('search_providers requires q and forwards it', async () => {
     apiKeyAuth,
     'search_providers',
     { q: 'exam' },
-    () => json({ count: 1, limit: 50, truncated: false, providers: [wireEntry] }),
+    () => json({ count: 1, limit: 50, providers: [wireProvider] }),
   )
   const url = new URL(calls[0].url)
   assert.equal(url.pathname, '/v0/providers/search')
   assert.equal(url.searchParams.get('q'), 'exam')
   assert.equal(result.isError, false)
-  assert.deepEqual(result.structuredContent.providers, [camelEntry])
+  assert.deepEqual(result.structuredContent.providers, [camelProvider])
 })
 
-test('get_provider surfaces the API error message AND its fix field', async () => {
+test('get_provider republishes a bare identity (no updatedAt) as-is', async () => {
+  // An unlisted provider the caller holds an account at resolves as id + name
+  // only — the schema must not require the catalog fields.
   const { result, calls } = await callTool(
     apiKeyAuth,
     'get_provider',
-    { providerId: wireEntry.provider_id },
+    { providerId: wireProvider.provider_id },
+    () => json({ provider_id: wireProvider.provider_id, name: 'Unlisted RP' }),
+  )
+  assert.equal(new URL(calls[0].url).pathname, `/v0/providers/${wireProvider.provider_id}`)
+  assert.equal(result.isError, false)
+  assert.deepEqual(result.structuredContent, {
+    providerId: wireProvider.provider_id,
+    name: 'Unlisted RP',
+  })
+})
+
+test('get_provider surfaces the API error message AND its fix field', async () => {
+  const { result } = await callTool(
+    apiKeyAuth,
+    'get_provider',
+    { providerId: wireProvider.provider_id },
     () =>
       json(
         {
           code: 'not_found',
-          message: 'Route not found',
-          fix: 'Magic browser credential enrollment is not enabled in this environment.',
+          message: 'Provider not found',
+          fix: 'List or search providers to find a valid provider_id.',
         },
         404,
       ),
   )
-  assert.equal(new URL(calls[0].url).pathname, `/v0/providers/${wireEntry.provider_id}`)
   assert.equal(result.isError, true)
-  assert.match(
-    result.content[0].text,
-    /AgentMail API 404: Route not found — Magic browser credential enrollment is not enabled/,
-  )
+  assert.match(result.content[0].text, /AgentMail API 404: Provider not found — List or search providers/)
 })
 
 test('a non-UUID providerId is rejected client-side, before any API call', async () => {
@@ -145,51 +156,59 @@ test('a non-UUID providerId is rejected client-side, before any API call', async
   assert.match(result.content[0].text, /Invalid UUID/)
 })
 
-test('list_provider_connections republishes rows camelCase, withholds pod_id, keeps truncated', async () => {
-  const wireConnection = {
+test('list_provider_accounts republishes rows camelCase and withholds tenancy ids', async () => {
+  const wireAccount = {
+    account_id: '44444444-4444-4444-8444-444444444444',
+    provider_id: wireProvider.provider_id,
+    provider_name: 'Example RP',
     inbox_id: 'agent@example.agentmail.to',
     pod_id: '22222222-2222-4222-8222-222222222222',
-    first_signed_up_at: '2026-08-01T00:00:00.000Z',
+    organization_id: '55555555-5555-4555-8555-555555555555',
+    first_signed_in_at: '2026-08-01T00:00:00.000Z',
     last_signed_in_at: '2026-08-30T00:00:00.000Z',
     sign_in_count: 3,
   }
   const { result, calls } = await callTool(
     apiKeyAuth,
-    'list_provider_connections',
-    { providerId: wireEntry.provider_id },
-    () => json({ count: 1, truncated: true, connections: [wireConnection] }),
+    'list_provider_accounts',
+    { providerId: wireProvider.provider_id },
+    () => json({ provider: wireProvider, count: 1, accounts: [wireAccount] }),
   )
-  assert.equal(new URL(calls[0].url).pathname, `/v0/providers/${wireEntry.provider_id}/connections`)
+  assert.equal(new URL(calls[0].url).pathname, `/v0/providers/${wireProvider.provider_id}/accounts`)
   assert.equal(result.isError, false)
   assert.deepEqual(result.structuredContent, {
+    provider: camelProvider,
     count: 1,
-    truncated: true,
-    connections: [
+    accounts: [
       {
-        inboxId: wireConnection.inbox_id,
-        firstSignedUpAt: wireConnection.first_signed_up_at,
-        lastSignedInAt: wireConnection.last_signed_in_at,
-        signInCount: wireConnection.sign_in_count,
+        accountId: wireAccount.account_id,
+        providerId: wireAccount.provider_id,
+        providerName: wireAccount.provider_name,
+        inboxId: wireAccount.inbox_id,
+        firstSignedInAt: wireAccount.first_signed_in_at,
+        lastSignedInAt: wireAccount.last_signed_in_at,
+        signInCount: wireAccount.sign_in_count,
       },
     ],
   })
 })
 
-test('create_provider_connection sends an Idempotency-Key and the inbox body', async () => {
+test('connect_provider sends an Idempotency-Key and the inbox/authorize body', async () => {
   const { result, calls } = await callTool(
     apiKeyAuth,
-    'create_provider_connection',
-    { providerId: wireEntry.provider_id, inboxId: 'agent@example.agentmail.to' },
+    'connect_provider',
+    { providerId: wireProvider.provider_id, inboxId: 'agent@example.agentmail.to', authorize: true },
     () => json(accepted, 202),
   )
   const { init } = calls[0]
   assert.equal(init.method, 'POST')
+  assert.equal(new URL(calls[0].url).pathname, `/v0/providers/${wireProvider.provider_id}/connect`)
   // Auto-generated when the caller does not pass one — the API requires it.
   assert.match(init.headers['Idempotency-Key'], UUID_RE)
-  assert.deepEqual(JSON.parse(init.body), { inbox_id: 'agent@example.agentmail.to' })
+  assert.deepEqual(JSON.parse(init.body), { inbox_id: 'agent@example.agentmail.to', authorize: true })
   assert.equal(result.isError, false)
   assert.deepEqual(result.structuredContent, {
-    enrollmentSessionId: accepted.enrollment_session_id,
+    sessionId: accepted.session_id,
     magicUrl: accepted.magic_url,
     expiresAt: accepted.expires_at,
   })
@@ -198,17 +217,17 @@ test('create_provider_connection sends an Idempotency-Key and the inbox body', a
 test('auto-generated idempotency keys are fresh per call, never a shared constant', async () => {
   // The API's contract is dedup-with-conflict, not replay: a reused key 409s.
   // A module-level constant key would pass any single-call test while breaking
-  // every create after the first in production — so pin per-call freshness.
+  // every connect after the first in production — so pin per-call freshness.
   const first = await callTool(
     apiKeyAuth,
-    'create_provider_connection',
-    { providerId: wireEntry.provider_id, inboxId: 'agent@example.agentmail.to' },
+    'connect_provider',
+    { providerId: wireProvider.provider_id, inboxId: 'agent@example.agentmail.to' },
     () => json(accepted, 202),
   )
   const second = await callTool(
     apiKeyAuth,
-    'create_provider_connection',
-    { providerId: wireEntry.provider_id, inboxId: 'agent@example.agentmail.to' },
+    'connect_provider',
+    { providerId: wireProvider.provider_id, inboxId: 'agent@example.agentmail.to' },
     () => json(accepted, 202),
   )
   const key1 = first.calls[0].init.headers['Idempotency-Key']
@@ -218,22 +237,22 @@ test('auto-generated idempotency keys are fresh per call, never a shared constan
   assert.notEqual(key1, key2)
 })
 
-test('create_provider_connection omits the body and honors a caller idempotency key', async () => {
+test('connect_provider omits the body and honors a caller idempotency key', async () => {
   const { calls } = await callTool(
     apiKeyAuth,
-    'create_provider_connection',
-    { providerId: wireEntry.provider_id, idempotencyKey: 'retry-key-1' },
+    'connect_provider',
+    { providerId: wireProvider.provider_id, idempotencyKey: 'retry-key-1' },
     () => json(accepted, 202),
   )
   assert.equal(calls[0].init.headers['Idempotency-Key'], 'retry-key-1')
   assert.equal(calls[0].init.body, undefined)
 })
 
-test('create_provider_connection refuses OAuth sessions without calling the API', async () => {
+test('connect_provider refuses OAuth sessions without calling the API', async () => {
   const { result, calls } = await callTool(
     { kind: 'clerk', clerkUserId: 'user_1' },
-    'create_provider_connection',
-    { providerId: wireEntry.provider_id },
+    'connect_provider',
+    { providerId: wireProvider.provider_id },
     () => {
       throw new Error('must not reach the API')
     },
@@ -282,11 +301,11 @@ test('a numeric Retry-After shortens the backoff instead of the fallback', async
   assert.ok(Date.now() - started < 700, 'Retry-After: 0 must override the exponential fallback')
 })
 
-test('create_provider_connection never retries — a duplicate POST could double-mint', async () => {
+test('connect_provider never retries — a duplicate POST could double-mint', async () => {
   const { result, calls } = await callTool(
     apiKeyAuth,
-    'create_provider_connection',
-    { providerId: wireEntry.provider_id, inboxId: 'agent@example.agentmail.to' },
+    'connect_provider',
+    { providerId: wireProvider.provider_id, inboxId: 'agent@example.agentmail.to' },
     () => new Response('busy', { status: 503, headers: { 'retry-after': '0' } }),
   )
   assert.equal(calls.length, 1)
@@ -315,7 +334,7 @@ test('a response that violates the declared output schema is an internal error, 
     apiKeyAuth,
     'list_providers',
     {},
-    () => json({ providers: [{ provider_id: 'not-the-right-shape' }] }),
+    () => json({ providers: [{ provider_id: 12345 }] }),
   )
   assert.equal(result.isError, true)
   assert.match(result.content[0].text, /did not match its declared output schema/)
