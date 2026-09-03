@@ -248,18 +248,45 @@ test('connect_provider omits the body and honors a caller idempotency key', asyn
   assert.equal(calls[0].init.body, undefined)
 })
 
-test('connect_provider refuses OAuth sessions without calling the API', async () => {
-  const { result, calls } = await callTool(
+test('connect_provider attempts OAuth sessions instead of refusing client-side', async () => {
+  // The API owns the credential rule for connect (a console-JWT branch exists
+  // behind a deployment flag), so the old hard refusal is gone. Without Clerk
+  // env vars the bearer resolution itself fails in this test — the invariant
+  // pinned is that no 'requires an API-key session' refusal short-circuits the
+  // attempt any more.
+  const { result } = await callTool(
     { kind: 'clerk', clerkUserId: 'user_1' },
     'connect_provider',
     { providerId: wireProvider.provider_id },
-    () => {
-      throw new Error('must not reach the API')
-    },
+    () => json(accepted, 202),
   )
-  assert.equal(calls.length, 0)
   assert.equal(result.isError, true)
-  assert.match(result.content[0].text, /requires an API-key session/)
+  assert.doesNotMatch(result.content[0].text, /requires an API-key session/)
+})
+
+test('list_provider_accounts treats provider: null as absent, not a crash', async () => {
+  // The API always sends the key — null, never absent — for an unknown or
+  // unconnected provider; the common miss case must be an empty list.
+  const { result } = await callTool(
+    apiKeyAuth,
+    'list_provider_accounts',
+    { providerId: wireProvider.provider_id },
+    () => json({ provider: null, count: 0, accounts: [] }),
+  )
+  assert.equal(result.isError, false)
+  assert.deepEqual(result.structuredContent, { count: 0, accounts: [] })
+})
+
+test('connect_provider transmits authorize: false rather than dropping it', async () => {
+  // Omitting authorize means "keep the first-use disclosure" — not the same
+  // request as an explicit false, so the falsy value must survive.
+  const { calls } = await callTool(
+    apiKeyAuth,
+    'connect_provider',
+    { providerId: wireProvider.provider_id, inboxId: 'agent@example.agentmail.to', authorize: false },
+    () => json(accepted, 202),
+  )
+  assert.deepEqual(JSON.parse(calls[0].init.body), { inbox_id: 'agent@example.agentmail.to', authorize: false })
 })
 
 test('provider tools without any auth return the standard no-auth error', async () => {

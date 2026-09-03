@@ -554,28 +554,29 @@ export function createMcpServer(auth: AuthSource): McpServer {
             async (args, extra) => {
                 try {
                     if (auth.kind === 'none') return noAuthMessage
-                    // The API re-authenticates this tool's raw bearer as an API key
-                    // (console JWTs can never pass), so refuse OAuth sessions with a
-                    // remedy instead of relaying the upstream 401.
-                    if (tool.apiKeyOnly && auth.kind !== 'apiKey') {
-                        return {
-                            content: [
-                                {
-                                    type: 'text' as const,
-                                    text:
-                                        `${tool.name} requires an API-key session. Connect with an ` +
-                                        'AgentMail API key (get one at https://console.agentmail.to) ' +
-                                        'instead of OAuth sign-in, then retry.',
-                                },
-                            ],
-                            isError: true,
-                        }
-                    }
                     const bearer =
                         auth.kind === 'apiKey'
                             ? auth.apiKey
                             : await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId)
-                    return await runProviderTool(tool, { bearer, signal: extra?.signal }, args)
+                    const result = await runProviderTool(tool, { bearer, signal: extra?.signal }, args)
+                    // The API owns which credentials each provider endpoint accepts
+                    // (connect historically required a raw API key; a console-JWT
+                    // branch now exists behind a deployment flag). Attempting the
+                    // call and translating a credential rejection keeps this layer
+                    // correct whichever way that flag points — a hardcoded refusal
+                    // here would keep blocking OAuth sessions after the API starts
+                    // accepting them.
+                    if (
+                        result.isError &&
+                        auth.kind === 'clerk' &&
+                        result.content[0] !== undefined &&
+                        /AgentMail API 401/.test(result.content[0].text)
+                    ) {
+                        result.content[0].text +=
+                            ' — This environment may require an AgentMail API key for this tool: ' +
+                            'connect with an API key (create one at https://console.agentmail.to) and retry.'
+                    }
+                    return result
                 } catch (error) {
                     return toolFailure(tool.name, error)
                 }

@@ -51,9 +51,9 @@ const coreTools = [
   'connect_provider',
 ]
 const oauthTools = ['list_organizations', 'select_organization']
-// API-key-only at runtime: the API strictly re-authenticates the raw bearer as
-// an API key for this tool, so OAuth sessions are refused with a remedy.
-const apiKeyOnlyTools = ['connect_provider']
+// Always empty now: credential requirements are enforced by the API, not
+// refused client-side — the server appends an API-key remedy to a 401 instead.
+const apiKeyOnlyTools = []
 
 test('runtime manifest has the canonical tool contract exactly once', () => {
   const names = manifest.tools.map(({ name }) => name)
