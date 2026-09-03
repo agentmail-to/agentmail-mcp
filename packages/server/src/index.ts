@@ -559,6 +559,9 @@ export function createMcpServer(auth: AuthSource): McpServer {
                             ? auth.apiKey
                             : await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId)
                     const result = await runProviderTool(tool, { bearer, signal: extra?.signal }, args)
+                    // connect_provider only: a 401 on a read is a credential problem,
+                    // not an endpoint rule, and telling that caller to make an API key
+                    // would be the wrong remedy.
                     // The API owns which credentials each provider endpoint accepts
                     // (connect historically required a raw API key; a console-JWT
                     // branch now exists behind a deployment flag). Attempting the
@@ -569,6 +572,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     if (
                         result.isError &&
                         auth.kind === 'clerk' &&
+                        tool.name === 'connect_provider' &&
                         result.content[0] !== undefined &&
                         /AgentMail API 401/.test(result.content[0].text)
                     ) {
