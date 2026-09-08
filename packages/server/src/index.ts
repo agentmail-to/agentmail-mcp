@@ -40,6 +40,8 @@ import { monitorEventLoopDelay } from 'node:perf_hooks'
 import fs from 'node:fs'
 import { z } from 'zod'
 
+import { PROVIDER_TOOLS, runProviderTool } from './provider-tools.js'
+
 // ============================================================================
 // Config
 // ============================================================================
@@ -293,7 +295,10 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
 }
 
 /**
- * Build an AgentMailClient backed by a console JWT for the user's selected org.
+ * Resolve the console JWT for a Clerk OAuth user's selected org — the bearer
+ * every AgentMail call on the OAuth path authenticates with. Split from
+ * buildClientFromClerkUser so the provider tools, which speak to endpoints the
+ * SDK does not know yet, can borrow the same credential without a client.
  *
  * Selection rules (in precedence order):
  *   1. If `selectedClerkOrgId` is provided (token carried an `org_id` claim —
@@ -316,11 +321,7 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  * This makes multi-org work for every client (Claude/Cursor/Codex) without
  * depending on the Clerk consent-screen org picker or per-client UA hacks.
  */
-async function buildClientFromClerkUser(
-    clerkUserId: string,
-    selectedClerkOrgId?: string,
-    signal?: AbortSignal
-): Promise<AgentMailClient> {
+async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: string): Promise<string> {
     const memberships = await clerkClient.users.getOrganizationMembershipList({
         userId: clerkUserId,
     })
@@ -372,7 +373,16 @@ async function buildClientFromClerkUser(
         internalOrgId = await getInternalOrganizationId(chosenOrg.id)
     }
 
-    const consoleJwt = await signConsoleJwt(internalOrgId)
+    return signConsoleJwt(internalOrgId)
+}
+
+/** Build an AgentMailClient backed by the resolved console JWT (see above). */
+async function buildClientFromClerkUser(
+    clerkUserId: string,
+    selectedClerkOrgId?: string,
+    signal?: AbortSignal
+): Promise<AgentMailClient> {
+    const consoleJwt = await resolveClerkConsoleJwt(clerkUserId, selectedClerkOrgId)
     return new AgentMailClient({
         environment: AGENTMAIL_API_URL
             ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
@@ -448,6 +458,29 @@ const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeh
 // list_organizations/select_organization instead.
 const STATIC_TOOLS = staticToolkit.getTools().filter((tool) => tool.name !== 'auth_me')
 
+// The provider tools are a stopgap until agentmail-toolkit ships them (see
+// provider-tools.ts). Filter, don't assume: registerTool throws on a duplicate
+// name inside the per-request createMcpServer, so without this a toolkit
+// version that adds its own list_providers would turn EVERY request into a 500
+// the moment the dependency is bumped. The filter makes the stopgap
+// self-retiring — the toolkit's implementation simply wins.
+const staticToolNames = new Set(STATIC_TOOLS.map((tool) => tool.name))
+// Exported for generate-manifest.mjs: the manifest must describe the tools the
+// server ACTUALLY registers — deriving from the unfiltered PROVIDER_TOOLS
+// would keep stamping apiKeyOnly on a tool the toolkit has taken over.
+export const ACTIVE_PROVIDER_TOOLS = PROVIDER_TOOLS.filter((tool) => !staticToolNames.has(tool.name))
+
+// The uniform failure shape every tool callback returns — one definition so a
+// change to the error contract (redaction, request ids) lands everywhere.
+const toolFailure = (name: string, error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[mcp] tool ${name} failed:`, error)
+    return {
+        content: [{ type: 'text' as const, text: `Error: ${message}` }],
+        isError: true,
+    }
+}
+
 export function createMcpServer(auth: AuthSource): McpServer {
     const server = new McpServer({ name: 'AgentMail', version: '1.0.0' })
 
@@ -496,21 +529,70 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 }
                 return realTool.callback(args, extra)
             } catch (error) {
-                const message = error instanceof Error ? error.message : String(error)
-                console.error(`[mcp] tool ${tool.name} failed:`, error)
-                return {
-                    content: [{ type: 'text' as const, text: `Error: ${message}` }],
-                    isError: true,
-                }
+                return toolFailure(tool.name, error)
             }
         })
+    }
+
+    // Provider marketplace tools — endpoints the published SDK does not cover
+    // yet, so they bypass the toolkit and call the API directly with the same
+    // bearer the SDK would send (see provider-tools.ts).
+    for (const tool of ACTIVE_PROVIDER_TOOLS) {
+        server.registerTool(
+            tool.name,
+            {
+                title: tool.title,
+                description: tool.description,
+                // The ZodObject instances themselves, not .shape: the SDK
+                // passes an instance through untouched, where a raw shape
+                // makes it rebuild z.object() per registration — per REQUEST
+                // here, retained for the life of an SSE connection.
+                inputSchema: tool.paramsSchema,
+                outputSchema: tool.outputSchema,
+                annotations: tool.annotations,
+            },
+            async (args, extra) => {
+                try {
+                    if (auth.kind === 'none') return noAuthMessage
+                    const bearer =
+                        auth.kind === 'apiKey'
+                            ? auth.apiKey
+                            : await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId)
+                    const result = await runProviderTool(tool, { bearer, signal: extra?.signal }, args)
+                    // connect_provider only: a 401 on a read is a credential problem,
+                    // not an endpoint rule, and telling that caller to make an API key
+                    // would be the wrong remedy.
+                    // The API owns which credentials each provider endpoint accepts
+                    // (connect historically required a raw API key; a console-JWT
+                    // branch now exists behind a deployment flag). Attempting the
+                    // call and translating a credential rejection keeps this layer
+                    // correct whichever way that flag points — a hardcoded refusal
+                    // here would keep blocking OAuth sessions after the API starts
+                    // accepting them.
+                    if (
+                        result.isError &&
+                        auth.kind === 'clerk' &&
+                        tool.name === 'connect_provider' &&
+                        result.content[0] !== undefined &&
+                        /AgentMail API 401/.test(result.content[0].text)
+                    ) {
+                        result.content[0].text +=
+                            ' — This environment may require an AgentMail API key for this tool: ' +
+                            'connect with an API key (create one at https://console.agentmail.to) and retry.'
+                    }
+                    return result
+                } catch (error) {
+                    return toolFailure(tool.name, error)
+                }
+            }
+        )
     }
 
     // Org-selection tools (Clerk OAuth only). Let a multi-org user choose which
     // org their mail operations target, without relying on the Clerk consent
     // picker (which DCR clients can't use) or any per-client UA hack. The choice
     // persists in Clerk privateMetadata and applies to all future requests until
-    // changed. See buildClientFromClerkUser path 3/4.
+    // changed. See resolveClerkConsoleJwt path 3/4.
     if (CLERK_ENABLED) {
         const NON_CLERK_MSG =
             'Organization selection only applies to OAuth (Clerk) sessions. ' +
@@ -552,7 +634,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     const memberships = await clerkClient.users.getOrganizationMembershipList({
                         userId: auth.clerkUserId,
                     })
-                    // Report the EFFECTIVE org, mirroring buildClientFromClerkUser's
+                    // Report the EFFECTIVE org, mirroring resolveClerkConsoleJwt's
                     // precedence (token-pinned > single-org auto-pick > stored choice) —
                     // previously only the stored choice was reported, so pinned and
                     // single-org sessions showed nothing selected.
@@ -641,7 +723,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                         }
                     }
                     // A token-pinned session routes by its org_id claim regardless of the
-                    // stored choice (buildClientFromClerkUser path 1), so selecting a
+                    // stored choice (resolveClerkConsoleJwt path 1), so selecting a
                     // DIFFERENT org would silently not take effect — refuse instead.
                     // Selecting the already-pinned org is a truthful no-op.
                     if (auth.clerkOrgId && auth.clerkOrgId !== match.organization.id) {
@@ -794,7 +876,7 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
                 // Clerk's user:org:read scope puts the user's selected org in the
                 // access token's `org_id` claim. The @clerk/mcp-tools wrapper
                 // doesn't surface it, so we decode the raw token. Falls back to
-                // undefined if the claim is missing — see buildClientFromClerkUser
+                // undefined if the claim is missing — see resolveClerkConsoleJwt
                 // for how that case is handled (single-org auto-pick vs multi-org
                 // strict reject).
                 const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
@@ -1507,8 +1589,8 @@ app.get(['/', '/mcp'], (req, res, next) => {
 //
 // 67% of production traffic is MCP `ping` — a liveness probe whose only correct
 // answer is an empty result, promptly. On the full path each ping still paid
-// body parse + Clerk verification + a fresh McpServer with 26 registered tools
-// + SSE transport setup: ~3.7 ms of CPU for a reply that carries no data. On a
+// body parse + Clerk verification + a fresh McpServer with every registered
+// tool + SSE transport setup: ~3.7 ms of CPU for a reply that carries no data. On a
 // quota-throttled machine with a ~62 ms/s budget, pings alone consumed most of
 // the sustained capacity.
 //
@@ -1567,7 +1649,7 @@ if (CLERK_ENABLED) {
     // Multi-org users no longer need the Clerk consent-screen org picker (which
     // required user:org:read): they pick their org in-session via the
     // `select_organization` MCP tool, which works for every client. See
-    // buildClientFromClerkUser path 3/4. (An earlier fix tried advertising the
+    // resolveClerkConsoleJwt path 3/4. (An earlier fix tried advertising the
     // scope only to Claude via User-Agent; dropped because Claude's real
     // discovery UA — python-httpx / empty / Chrome — isn't distinguishable.)
     const protectedResourceHandler = protectedResourceHandlerClerk({

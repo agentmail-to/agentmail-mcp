@@ -19,7 +19,16 @@ await client.close()
 await server.close()
 
 const oauthToolNames = new Set(['list_organizations', 'select_organization'])
-const contract = tools.map((tool) => ({ ...tool, oauthOnly: oauthToolNames.has(tool.name) }))
+// Historical flag, now always empty: credential requirements are the API's to
+// enforce (connect_provider attempts the call on every session and the server
+// appends a remedy on a 401), so no tool is refused client-side by auth kind.
+// The key stays in the manifest for contract continuity.
+const apiKeyOnlyToolNames = new Set()
+const contract = tools.map((tool) => ({
+  ...tool,
+  oauthOnly: oauthToolNames.has(tool.name),
+  apiKeyOnly: apiKeyOnlyToolNames.has(tool.name),
+}))
 const digest = createHash('sha256').update(JSON.stringify(contract)).digest('hex')
 const manifest = {
   schemaVersion: 1,

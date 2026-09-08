@@ -40,8 +40,20 @@ const coreTools = [
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
+  //
+  // Provider marketplace tools live in the server itself (provider-tools.ts):
+  // the /v0/providers endpoints postdate the published SDK, so the toolkit has
+  // no tools for them yet.
+  'list_providers',
+  'search_providers',
+  'get_provider',
+  'list_provider_accounts',
+  'connect_provider',
 ]
 const oauthTools = ['list_organizations', 'select_organization']
+// Always empty now: credential requirements are enforced by the API, not
+// refused client-side — the server appends an API-key remedy to a 401 instead.
+const apiKeyOnlyTools = []
 
 test('runtime manifest has the canonical tool contract exactly once', () => {
   const names = manifest.tools.map(({ name }) => name)
@@ -53,6 +65,10 @@ test('runtime manifest has the canonical tool contract exactly once', () => {
   assert.deepEqual(
     manifest.tools.filter(({ oauthOnly }) => oauthOnly).map(({ name }) => name).sort(),
     oauthTools.sort(),
+  )
+  assert.deepEqual(
+    manifest.tools.filter(({ apiKeyOnly }) => apiKeyOnly).map(({ name }) => name).sort(),
+    apiKeyOnlyTools.sort(),
   )
   for (const tool of manifest.tools) {
     assert.equal(tool.inputSchema?.type, 'object', `${tool.name} input schema`)
