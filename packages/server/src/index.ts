@@ -456,7 +456,36 @@ const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeh
 // OpenAI app review treats as unnecessary internal identifiers on this surface —
 // disclosure cannot cure "unnecessary". Hosted sessions get org context via
 // list_organizations/select_organization instead.
-const STATIC_TOOLS = staticToolkit.getTools().filter((tool) => tool.name !== 'auth_me')
+const STATIC_TOOLS = staticToolkit
+    .getTools()
+    .filter((tool) => tool.name !== 'auth_me')
+    .map((tool) =>
+        tool.name === 'get_thread'
+            ? {
+                  ...tool,
+                  description:
+                      tool.description +
+                      ' Returns messages oldest-to-newest within each page; the first page contains the newest messages. Use nextPageToken to retrieve older messages.',
+                  inputSchema: {
+                      ...tool.inputSchema,
+                      limit: z
+                          .number()
+                          .int()
+                          .positive()
+                          .max(100)
+                          .optional()
+                          .describe('Maximum messages to return'),
+                      pageToken: z.string().optional().describe('Page token for retrieving older messages'),
+                  },
+                  outputSchema: {
+                      ...tool.outputSchema,
+                      count: z.number().describe('Number of messages returned in this page'),
+                      limit: z.number().optional().describe('Requested message limit'),
+                      nextPageToken: z.string().optional().describe('Page token for retrieving older messages'),
+                  },
+              }
+            : tool
+    )
 
 // The provider tools are a stopgap until agentmail-toolkit ships them (see
 // provider-tools.ts). Filter, don't assume: registerTool throws on a duplicate
@@ -478,6 +507,60 @@ const toolFailure = (name: string, error: unknown) => {
     return {
         content: [{ type: 'text' as const, text: `Error: ${message}` }],
         isError: true,
+    }
+}
+
+const normalizeToolResult = (value: unknown): unknown => {
+    if (value instanceof Date) return value.toISOString()
+    if (Array.isArray(value)) return value.map(normalizeToolResult)
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value)
+                .filter(([, entry]) => entry !== undefined)
+                .map(([key, entry]) => [key, normalizeToolResult(entry)])
+        )
+    }
+    return value
+}
+
+const runGetThread = async (
+    tool: (typeof STATIC_TOOLS)[number],
+    client: AgentMailClient,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+) => {
+    const { inboxId, threadId, limit, pageToken } = args as {
+        inboxId: string
+        threadId: string
+        limit?: number
+        pageToken?: string
+    }
+    const result = await client.inboxes.threads.get(inboxId, threadId, {
+        abortSignal: signal,
+        queryParams: { limit, page_token: pageToken },
+    })
+    const normalized = normalizeToolResult({
+        ...result,
+        nextPageToken: (result as typeof result & { next_page_token?: string }).next_page_token,
+    })
+    const parsed = z.object(tool.outputSchema).safeParse(normalized)
+    if (!parsed.success) {
+        console.error('[mcp] get_thread output schema mismatch', { issues: parsed.error.issues })
+        return {
+            content: [
+                {
+                    type: 'text' as const,
+                    text: 'Internal error: get_thread result did not match its declared output schema',
+                },
+            ],
+            isError: true,
+        }
+    }
+    const structuredContent = parsed.data
+    return {
+        content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }],
+        structuredContent,
+        isError: false,
     }
 }
 
@@ -519,6 +602,10 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 // toolkit's tools were created with the placeholder client;
                 // we need to call them with the real one. We do this by
                 // creating a fresh toolkit + tool for this call.
+                if (tool.name === 'get_thread') {
+                    return runGetThread(tool, client, args, extra?.signal)
+                }
+
                 const realToolkit = new AgentMailToolkit(client)
                 const realTool = realToolkit.getTools().find((t) => t.name === tool.name)
                 if (!realTool) {

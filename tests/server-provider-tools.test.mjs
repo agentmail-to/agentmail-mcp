@@ -44,6 +44,43 @@ const apiKeyAuth = { kind: 'apiKey', apiKey: 'am_test_key' }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
+test('get_thread forwards message pagination and republishes its cursor', async () => {
+  const timestamp = '2026-09-10T00:00:00.000Z'
+  const { result, calls } = await callTool(
+    apiKeyAuth,
+    'get_thread',
+    { inboxId: 'agent@example.com', threadId: 'thread-1', limit: 25, pageToken: 'older-page' },
+    () =>
+      json({
+        inbox_id: 'agent@example.com',
+        thread_id: 'thread-1',
+        labels: [],
+        timestamp,
+        senders: [],
+        recipients: [],
+        last_message_id: 'message-1',
+        message_count: 200,
+        size: 1,
+        updated_at: timestamp,
+        created_at: timestamp,
+        messages: [],
+        count: 0,
+        limit: 25,
+        next_page_token: 'next-older-page',
+      }),
+  )
+
+  const url = new URL(calls[0].url)
+  assert.equal(url.pathname, '/v0/inboxes/agent%40example.com/threads/thread-1')
+  assert.equal(url.searchParams.get('limit'), '25')
+  assert.equal(url.searchParams.get('page_token'), 'older-page')
+  assert.equal(result.isError, false)
+  assert.equal(result.structuredContent.count, 0)
+  assert.equal(result.structuredContent.limit, 25)
+  assert.equal(result.structuredContent.nextPageToken, 'next-older-page')
+  assert.equal('next_page_token' in result.structuredContent, false)
+})
+
 const wireProvider = {
   provider_id: '11111111-1111-4111-8111-111111111111',
   name: 'Example RP',

@@ -75,3 +75,13 @@ test('runtime manifest has the canonical tool contract exactly once', () => {
     assert.ok(tool.description, `${tool.name} description`)
   }
 })
+
+test('get_thread exposes backward message pagination', () => {
+  const tool = manifest.tools.find(({ name }) => name === 'get_thread')
+  assert.equal(tool.inputSchema.properties.limit.maximum, 100)
+  assert.ok(tool.inputSchema.properties.pageToken)
+  assert.ok(tool.outputSchema.properties.count)
+  assert.ok(tool.outputSchema.properties.limit)
+  assert.ok(tool.outputSchema.properties.nextPageToken)
+  assert.match(tool.description, /first page contains the newest messages/)
+})
