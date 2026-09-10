@@ -8,7 +8,7 @@ process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 // the same way index.ts resolves AGENTMAIL_API_URL for the SDK client.
 process.env.AGENTMAIL_API_URL = 'https://api.example.test'
 
-const { createMcpServer } = await import('../packages/server/build/index.js')
+const { createMcpServer, getThreadPage } = await import('../packages/server/build/index.js')
 
 /** Call one tool through a real MCP client against a per-test server, with
  * global fetch stubbed — exercising the registration wrapper in index.ts, not
@@ -66,7 +66,8 @@ test('get_thread forwards message pagination and republishes its cursor', async 
         messages: [],
         count: 0,
         limit: 25,
-        next_page_token: 'next-older-page',
+        next_page_token: 'legacy-cursor',
+        nextPageToken: 'next-older-page',
       }),
   )
 
@@ -79,6 +80,31 @@ test('get_thread forwards message pagination and republishes its cursor', async 
   assert.equal(result.structuredContent.limit, 25)
   assert.equal(result.structuredContent.nextPageToken, 'next-older-page')
   assert.equal('next_page_token' in result.structuredContent, false)
+})
+
+test('get_thread uses Fern request and request-options slots after SDK regeneration', async () => {
+  const calls = []
+  const get = async function regeneratedGet(inboxId, threadId, request = {}, requestOptions) {
+    calls.push({ inboxId, threadId, request, requestOptions })
+    return {}
+  }
+  const client = { inboxes: { threads: { get } } }
+  const signal = AbortSignal.abort()
+
+  await getThreadPage(
+    client,
+    { inboxId: 'agent@example.com', threadId: 'thread-1', limit: 25, pageToken: 'older-page' },
+    signal,
+  )
+
+  assert.deepEqual(calls, [
+    {
+      inboxId: 'agent@example.com',
+      threadId: 'thread-1',
+      request: { limit: 25, pageToken: 'older-page' },
+      requestOptions: { abortSignal: signal },
+    },
+  ])
 })
 
 const wireProvider = {

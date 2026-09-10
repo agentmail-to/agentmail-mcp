@@ -523,25 +523,43 @@ const normalizeToolResult = (value: unknown): unknown => {
     return value
 }
 
+type GetThreadPageArgs = {
+    inboxId: string
+    threadId: string
+    limit?: number
+    pageToken?: string
+}
+
+// Fern is adding a typed request argument ahead of RequestOptions when the docs contract is
+// regenerated. Support both the current three-argument SDK and that four-argument shape so a
+// dependency bump cannot silently move pagination into the wrong slot.
+export const getThreadPage = async (client: AgentMailClient, args: GetThreadPageArgs, signal?: AbortSignal) => {
+    const { inboxId, threadId, limit, pageToken } = args
+    const get = client.inboxes.threads.get as unknown as {
+        length: number
+        call: (receiver: unknown, ...args: unknown[]) => Promise<Record<string, unknown>>
+    }
+    const request = { limit, pageToken }
+    const requestOptions = { abortSignal: signal }
+    if (get.length === 3) {
+        return get.call(client.inboxes.threads, inboxId, threadId, {
+            ...requestOptions,
+            queryParams: { limit, page_token: pageToken },
+        })
+    }
+    return get.call(client.inboxes.threads, inboxId, threadId, request, requestOptions)
+}
+
 const runGetThread = async (
     tool: (typeof STATIC_TOOLS)[number],
     client: AgentMailClient,
     args: Record<string, unknown>,
     signal?: AbortSignal
 ) => {
-    const { inboxId, threadId, limit, pageToken } = args as {
-        inboxId: string
-        threadId: string
-        limit?: number
-        pageToken?: string
-    }
-    const result = await client.inboxes.threads.get(inboxId, threadId, {
-        abortSignal: signal,
-        queryParams: { limit, page_token: pageToken },
-    })
+    const result = await getThreadPage(client, args as GetThreadPageArgs, signal)
     const normalized = normalizeToolResult({
         ...result,
-        nextPageToken: (result as typeof result & { next_page_token?: string }).next_page_token,
+        nextPageToken: result.nextPageToken ?? result.next_page_token,
     })
     const parsed = z.object(tool.outputSchema).safeParse(normalized)
     if (!parsed.success) {
