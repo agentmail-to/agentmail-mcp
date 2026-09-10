@@ -531,8 +531,10 @@ type GetThreadPageArgs = {
 }
 
 // Fern is adding a typed request argument ahead of RequestOptions when the docs contract is
-// regenerated. Support both the current three-argument SDK and that four-argument shape so a
-// dependency bump cannot silently move pagination into the wrong slot.
+// regenerated. The legacy method is the only arity-3 shape; the regenerated method reports arity
+// 2 because Fern defaults `request = {}` and Function.length stops at the first default parameter.
+// TODO: remove this compatibility dispatch when the SDK containing GetThreadRequest is adopted;
+// its generated types should then verify the request field names directly.
 export const getThreadPage = async (client: AgentMailClient, args: GetThreadPageArgs, signal?: AbortSignal) => {
     const { inboxId, threadId, limit, pageToken } = args
     const get = client.inboxes.threads.get as unknown as {
