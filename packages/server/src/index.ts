@@ -456,7 +456,36 @@ const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeh
 // OpenAI app review treats as unnecessary internal identifiers on this surface —
 // disclosure cannot cure "unnecessary". Hosted sessions get org context via
 // list_organizations/select_organization instead.
-const STATIC_TOOLS = staticToolkit.getTools().filter((tool) => tool.name !== 'auth_me')
+const STATIC_TOOLS = staticToolkit
+    .getTools()
+    .filter((tool) => tool.name !== 'auth_me')
+    .map((tool) =>
+        tool.name === 'get_thread'
+            ? {
+                  ...tool,
+                  description:
+                      tool.description +
+                      ' Returns messages oldest-to-newest within each page; the first page contains the newest messages. Use nextPageToken to retrieve older messages.',
+                  inputSchema: {
+                      ...tool.inputSchema,
+                      limit: z
+                          .number()
+                          .int()
+                          .positive()
+                          .max(100)
+                          .optional()
+                          .describe('Maximum messages to return'),
+                      pageToken: z.string().optional().describe('Page token for retrieving older messages'),
+                  },
+                  outputSchema: {
+                      ...tool.outputSchema,
+                      count: z.number().describe('Number of messages returned in this page'),
+                      limit: z.number().optional().describe('Requested message limit'),
+                      nextPageToken: z.string().optional().describe('Page token for retrieving older messages'),
+                  },
+              }
+            : tool
+    )
 
 // The provider tools are a stopgap until agentmail-toolkit ships them (see
 // provider-tools.ts). Filter, don't assume: registerTool throws on a duplicate
@@ -478,6 +507,80 @@ const toolFailure = (name: string, error: unknown) => {
     return {
         content: [{ type: 'text' as const, text: `Error: ${message}` }],
         isError: true,
+    }
+}
+
+const normalizeToolResult = (value: unknown): unknown => {
+    if (value instanceof Date) return value.toISOString()
+    if (Array.isArray(value)) return value.map(normalizeToolResult)
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value)
+                .filter(([, entry]) => entry !== undefined)
+                .map(([key, entry]) => [key, normalizeToolResult(entry)])
+        )
+    }
+    return value
+}
+
+type GetThreadPageArgs = {
+    inboxId: string
+    threadId: string
+    limit?: number
+    pageToken?: string
+}
+
+// Fern is adding a typed request argument ahead of RequestOptions when the docs contract is
+// regenerated. The legacy method is the only arity-3 shape; the regenerated method reports arity
+// 2 because Fern defaults `request = {}` and Function.length stops at the first default parameter.
+// TODO: remove this compatibility dispatch when the SDK containing GetThreadRequest is adopted;
+// its generated types should then verify the request field names directly.
+export const getThreadPage = async (client: AgentMailClient, args: GetThreadPageArgs, signal?: AbortSignal) => {
+    const { inboxId, threadId, limit, pageToken } = args
+    const get = client.inboxes.threads.get as unknown as {
+        length: number
+        call: (receiver: unknown, ...args: unknown[]) => Promise<Record<string, unknown>>
+    }
+    const request = { limit, pageToken }
+    const requestOptions = { abortSignal: signal }
+    if (get.length === 3) {
+        return get.call(client.inboxes.threads, inboxId, threadId, {
+            ...requestOptions,
+            queryParams: { limit, page_token: pageToken },
+        })
+    }
+    return get.call(client.inboxes.threads, inboxId, threadId, request, requestOptions)
+}
+
+const runGetThread = async (
+    tool: (typeof STATIC_TOOLS)[number],
+    client: AgentMailClient,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+) => {
+    const result = await getThreadPage(client, args as GetThreadPageArgs, signal)
+    const normalized = normalizeToolResult({
+        ...result,
+        nextPageToken: result.nextPageToken ?? result.next_page_token,
+    })
+    const parsed = z.object(tool.outputSchema).safeParse(normalized)
+    if (!parsed.success) {
+        console.error('[mcp] get_thread output schema mismatch', { issues: parsed.error.issues })
+        return {
+            content: [
+                {
+                    type: 'text' as const,
+                    text: 'Internal error: get_thread result did not match its declared output schema',
+                },
+            ],
+            isError: true,
+        }
+    }
+    const structuredContent = parsed.data
+    return {
+        content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }],
+        structuredContent,
+        isError: false,
     }
 }
 
@@ -519,6 +622,10 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 // toolkit's tools were created with the placeholder client;
                 // we need to call them with the real one. We do this by
                 // creating a fresh toolkit + tool for this call.
+                if (tool.name === 'get_thread') {
+                    return runGetThread(tool, client, args, extra?.signal)
+                }
+
                 const realToolkit = new AgentMailToolkit(client)
                 const realTool = realToolkit.getTools().find((t) => t.name === tool.name)
                 if (!realTool) {
