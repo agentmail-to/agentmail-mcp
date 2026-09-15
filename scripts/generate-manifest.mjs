@@ -20,9 +20,8 @@ await server.close()
 
 const oauthToolNames = new Set(['list_organizations', 'select_organization'])
 // Historical flag, now always empty: credential requirements are the API's to
-// enforce (connect_provider attempts the call on every session and the server
-// appends a remedy on a 401), so no tool is refused client-side by auth kind.
-// The key stays in the manifest for contract continuity.
+// enforce, so no tool is refused client-side by auth kind. The key stays in the
+// manifest for contract continuity.
 const apiKeyOnlyToolNames = new Set()
 const contract = tools.map((tool) => ({
   ...tool,

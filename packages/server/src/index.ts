@@ -40,8 +40,6 @@ import { monitorEventLoopDelay } from 'node:perf_hooks'
 import fs from 'node:fs'
 import { z } from 'zod'
 
-import { PROVIDER_TOOLS, runProviderTool } from './provider-tools.js'
-
 // ============================================================================
 // Config
 // ============================================================================
@@ -296,9 +294,9 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
 
 /**
  * Resolve the console JWT for a Clerk OAuth user's selected org — the bearer
- * every AgentMail call on the OAuth path authenticates with. Split from
- * buildClientFromClerkUser so the provider tools, which speak to endpoints the
- * SDK does not know yet, can borrow the same credential without a client.
+ * every AgentMail call on the OAuth path authenticates with. Kept separate from
+ * buildClientFromClerkUser so the credential resolution is one unit and the
+ * client construction is a thin wrapper over it.
  *
  * Selection rules (in precedence order):
  *   1. If `selectedClerkOrgId` is provided (token carried an `org_id` claim —
@@ -487,18 +485,6 @@ const STATIC_TOOLS = staticToolkit
             : tool
     )
 
-// The provider tools are a stopgap until agentmail-toolkit ships them (see
-// provider-tools.ts). Filter, don't assume: registerTool throws on a duplicate
-// name inside the per-request createMcpServer, so without this a toolkit
-// version that adds its own list_providers would turn EVERY request into a 500
-// the moment the dependency is bumped. The filter makes the stopgap
-// self-retiring — the toolkit's implementation simply wins.
-const staticToolNames = new Set(STATIC_TOOLS.map((tool) => tool.name))
-// Exported for generate-manifest.mjs: the manifest must describe the tools the
-// server ACTUALLY registers — deriving from the unfiltered PROVIDER_TOOLS
-// would keep stamping apiKeyOnly on a tool the toolkit has taken over.
-export const ACTIVE_PROVIDER_TOOLS = PROVIDER_TOOLS.filter((tool) => !staticToolNames.has(tool.name))
-
 // The uniform failure shape every tool callback returns — one definition so a
 // change to the error contract (redaction, request ids) lands everywhere.
 const toolFailure = (name: string, error: unknown) => {
@@ -639,60 +625,6 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 return toolFailure(tool.name, error)
             }
         })
-    }
-
-    // Provider marketplace tools — endpoints the published SDK does not cover
-    // yet, so they bypass the toolkit and call the API directly with the same
-    // bearer the SDK would send (see provider-tools.ts).
-    for (const tool of ACTIVE_PROVIDER_TOOLS) {
-        server.registerTool(
-            tool.name,
-            {
-                title: tool.title,
-                description: tool.description,
-                // The ZodObject instances themselves, not .shape: the SDK
-                // passes an instance through untouched, where a raw shape
-                // makes it rebuild z.object() per registration — per REQUEST
-                // here, retained for the life of an SSE connection.
-                inputSchema: tool.paramsSchema,
-                outputSchema: tool.outputSchema,
-                annotations: tool.annotations,
-            },
-            async (args, extra) => {
-                try {
-                    if (auth.kind === 'none') return noAuthMessage
-                    const bearer =
-                        auth.kind === 'apiKey'
-                            ? auth.apiKey
-                            : await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId)
-                    const result = await runProviderTool(tool, { bearer, signal: extra?.signal }, args)
-                    // connect_provider only: a 401 on a read is a credential problem,
-                    // not an endpoint rule, and telling that caller to make an API key
-                    // would be the wrong remedy.
-                    // The API owns which credentials each provider endpoint accepts
-                    // (connect historically required a raw API key; a console-JWT
-                    // branch now exists behind a deployment flag). Attempting the
-                    // call and translating a credential rejection keeps this layer
-                    // correct whichever way that flag points — a hardcoded refusal
-                    // here would keep blocking OAuth sessions after the API starts
-                    // accepting them.
-                    if (
-                        result.isError &&
-                        auth.kind === 'clerk' &&
-                        tool.name === 'connect_provider' &&
-                        result.content[0] !== undefined &&
-                        /AgentMail API 401/.test(result.content[0].text)
-                    ) {
-                        result.content[0].text +=
-                            ' — This environment may require an AgentMail API key for this tool: ' +
-                            'connect with an API key (create one at https://console.agentmail.to) and retry.'
-                    }
-                    return result
-                } catch (error) {
-                    return toolFailure(tool.name, error)
-                }
-            }
-        )
     }
 
     // Org-selection tools (Clerk OAuth only). Let a multi-org user choose which

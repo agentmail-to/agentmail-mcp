@@ -43,11 +43,11 @@ importers:
         specifier: 1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       agentmail:
-        specifier: 0.5.14
-        version: 0.5.14
+        specifier: 0.5.25
+        version: 0.5.25
       agentmail-toolkit:
-        specifier: 0.6.1
-        version: 0.6.1(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
+        specifier: 0.7.0
+        version: 0.7.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
       cors:
         specifier: 2.8.5
         version: 2.8.5
@@ -180,8 +180,8 @@ packages:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
 
-  agentmail-toolkit@0.6.1:
-    resolution: {integrity: sha512-tAjvLonnOcNQFUnaNTWRLQFK2JrD7uZUjhlw6irhil4c+xgpVTPuG9JyIrED2Syf9GPYFdhJcghm653eDOQ2Yw==}
+  agentmail-toolkit@0.7.0:
+    resolution: {integrity: sha512-UJ0VwBQLvIIWetE9qB/blv4OQL0h/GaIsf7wzt9Y5L26M2oonTaHX/lxp5Agk5WldHbwpnehE/mTabv/GM8pMg==}
     peerDependencies:
       '@mariozechner/pi-agent-core': ^0.50.1
       '@modelcontextprotocol/sdk': ^1.24.1
@@ -200,9 +200,14 @@ packages:
       langchain:
         optional: true
 
-  agentmail@0.5.14:
-    resolution: {integrity: sha512-2vp2W1abVvEGlM0/JgYHFEeX6MoJf3S/0oIEvxSU8/Lz7YkvOGo3v882lX8NOv2ZTpJMshATLIJrlNIIoo5uvA==}
+  agentmail@0.5.25:
+    resolution: {integrity: sha512-RxIEqlUlzrtVKqtX4nv2HhYSSJj1YtfXLWpu67jY8DNyLFMSK+pz8z5L62h5YtRtDNrX3B7nfKDm4sknbxAkpA==}
     engines: {node: '>=18.0.0'}
+    peerDependencies:
+      '@x402/fetch': ^2
+    peerDependenciesMeta:
+      '@x402/fetch':
+        optional: true
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
@@ -774,9 +779,9 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  agentmail-toolkit@0.6.1(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
+  agentmail-toolkit@0.7.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
     dependencies:
-      agentmail: 0.5.14
+      agentmail: 0.5.25
       jszip: 3.10.1
       unpdf: 1.6.2
       zod: 4.4.3
@@ -784,10 +789,11 @@ snapshots:
       '@modelcontextprotocol/sdk': 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
     transitivePeerDependencies:
       - '@napi-rs/canvas'
+      - '@x402/fetch'
       - bufferutil
       - utf-8-validate
 
-  agentmail@0.5.14:
+  agentmail@0.5.25:
     dependencies:
       ws: 8.21.0
     transitivePeerDependencies:
