@@ -41,18 +41,20 @@ const coreTools = [
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
   //
-  // Provider marketplace tools live in the server itself (provider-tools.ts):
-  // the /v0/providers endpoints postdate the published SDK, so the toolkit has
-  // no tools for them yet.
+  // Provider marketplace and catalog additions come from agentmail-toolkit 0.7.0.
   'list_providers',
   'search_providers',
   'get_provider',
-  'list_provider_accounts',
+  'list_accounts',
   'connect_provider',
+  'get_provider_connection',
+  'get_message',
+  'search_inboxes',
+  'unblock_recipient',
 ]
 const oauthTools = ['list_organizations', 'select_organization']
 // Always empty now: credential requirements are enforced by the API, not
-// refused client-side — the server appends an API-key remedy to a 401 instead.
+// refused client-side by auth kind.
 const apiKeyOnlyTools = []
 
 test('runtime manifest has the canonical tool contract exactly once', () => {
