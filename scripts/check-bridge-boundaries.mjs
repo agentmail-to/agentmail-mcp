@@ -11,7 +11,9 @@ for (const dependency of ['agentmail', 'agentmail-toolkit']) {
   }
 }
 
-const forbidden = /AgentMailClient|AgentMailToolkit|agentmail-toolkit|(?:^|["'`])\/v0\/|inputSchema|outputSchema/
+// A bridge may adapt a hosted schema for a transport-local capability, but it
+// must not author tools or embed the AgentMail API/toolkit implementation.
+const forbidden = /AgentMailClient|AgentMailToolkit|agentmail-toolkit|(?:^|["'`])\/v0\/|\bzod\b|registerTool|\.tool\(/
 for (const directory of [
   new URL('packages/npm-stdio-bridge/src', root),
   new URL('python/stdio-bridge/src', root),

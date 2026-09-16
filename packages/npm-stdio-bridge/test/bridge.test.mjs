@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -12,12 +15,143 @@ import {
     ToolListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 
-import { parseTools, startBridge } from '../build/index.js'
+import {
+    addLocalFileAttachmentVariant,
+    parseFileRoot,
+    parseTools,
+    resolveLocalFileAttachments,
+    startBridge,
+    validateFileRoot,
+} from '../build/index.js'
 
 test('parses the compatibility tool filter', () => {
     assert.equal(parseTools([]), undefined)
     assert.deepEqual([...parseTools(['--tools', 'one, two'])], ['one', 'two'])
     assert.throws(() => parseTools(['--tools']), /requires a comma-separated list/)
+})
+
+test('requires an explicit, existing local-file root', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentmail-mcp-root-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    assert.equal(parseFileRoot([]), undefined)
+    assert.equal(parseFileRoot(['--file-root', root]), root)
+    assert.throws(() => parseFileRoot(['--file-root']), /requires a directory path/)
+    assert.equal((await validateFileRoot(root)).path, await realpath(root))
+    await assert.rejects(validateFileRoot('relative/path'), /must be an absolute directory path/)
+    await assert.rejects(validateFileRoot(join(root, 'missing')), /must reference an existing directory/)
+})
+
+test('adds a local path variant to attachment-capable tools', () => {
+    const tool = addLocalFileAttachmentVariant({
+        name: 'send_message',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                attachments: {
+                    type: 'array',
+                    items: {
+                        anyOf: [
+                            {
+                                type: 'object',
+                                properties: { filename: { type: 'string' }, url: { type: 'string' } },
+                                required: ['url'],
+                                additionalProperties: false,
+                            },
+                            {
+                                type: 'object',
+                                properties: { filename: { type: 'string' }, content: { type: 'string' } },
+                                required: ['content'],
+                                additionalProperties: false,
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+    })
+
+    const variants = tool.inputSchema.properties.attachments.items.anyOf
+    assert.equal(variants.length, 3)
+    assert.deepEqual(variants[2].required, ['path'])
+    assert.deepEqual(Object.keys(variants[2].properties), ['filename', 'path'])
+})
+
+test('reads local attachments without putting their bytes in the client tool call', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentmail-mcp-bridge-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const file = join(root, 'report.pdf')
+    await writeFile(file, Buffer.from('%PDF-local-test'))
+    const validatedRoot = await validateFileRoot(root)
+
+    const resolved = await resolveLocalFileAttachments(
+        {
+            attachments: [{ path: 'report.pdf', contentType: 'application/pdf' }],
+        },
+        validatedRoot,
+    )
+    assert.deepEqual(resolved.attachments, [
+        {
+            filename: 'report.pdf',
+            contentType: 'application/pdf',
+            content: Buffer.from('%PDF-local-test').toString('base64'),
+        },
+    ])
+
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: '../outside.pdf' }] }, validatedRoot),
+        /is outside --file-root/,
+    )
+
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: 'missing.pdf' }] }, validatedRoot),
+        /does not exist or cannot be read/,
+    )
+
+    await writeFile(join(root, '.env'), 'SECRET=value')
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: '.env' }] }, validatedRoot),
+        /cannot contain hidden files or directories/,
+    )
+
+    const hidden = join(root, '.private')
+    await mkdir(hidden)
+    await writeFile(join(hidden, 'secret.pdf'), '%PDF-secret')
+    await symlink(join(hidden, 'secret.pdf'), join(root, 'public-name.pdf'))
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: 'public-name.pdf' }] }, validatedRoot),
+        /cannot resolve through hidden files or directories/,
+    )
+
+    await writeFile(join(root, 'real-name-v3.pdf'), '%PDF-real')
+    await symlink(join(root, 'real-name-v3.pdf'), join(root, 'report-alias.pdf'))
+    const aliased = await resolveLocalFileAttachments({ attachments: [{ path: 'report-alias.pdf' }] }, validatedRoot)
+    assert.equal(aliased.attachments[0].filename, 'report-alias.pdf')
+
+    await writeFile(join(root, 'too-large.bin'), Buffer.alloc(6 * 1024 * 1024 + 1))
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: 'too-large.bin' }] }, validatedRoot),
+        /exceed the 6 MiB combined limit/,
+    )
+})
+
+test('rejects a file root that is replaced after startup', async (t) => {
+    const parent = await mkdtemp(join(tmpdir(), 'agentmail-mcp-parent-'))
+    t.after(() => rm(parent, { recursive: true, force: true }))
+    const root = join(parent, 'root')
+    const movedRoot = join(parent, 'original-root')
+    const outside = join(parent, 'outside')
+    await mkdir(root)
+    await mkdir(outside)
+    await writeFile(join(outside, 'secret.pdf'), '%PDF-secret')
+    const validatedRoot = await validateFileRoot(root)
+
+    await rename(root, movedRoot)
+    await symlink(outside, root)
+
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: 'secret.pdf' }] }, validatedRoot),
+        /--file-root has changed since the bridge started/,
+    )
 })
 
 test('does not open stdio when the hosted connection fails', async () => {
