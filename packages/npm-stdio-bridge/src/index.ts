@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { realpathSync } from 'node:fs'
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { constants, realpathSync } from 'node:fs'
+import { open, realpath, stat } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -25,6 +25,12 @@ const USER_AGENT = 'agentmail-mcp-node/1.1.0'
 const MAX_LOCAL_ATTACHMENT_BYTES = 6 * 1024 * 1024
 
 type JsonObject = Record<string, unknown>
+
+export type ValidatedFileRoot = {
+    path: string
+    device: bigint
+    inode: bigint
+}
 
 function localFileVariant(baseVariant: JsonObject): JsonObject {
     const properties = (baseVariant.properties ?? {}) as JsonObject
@@ -103,17 +109,68 @@ export async function validateFileRoot(fileRoot: string) {
     } catch {
         throw new Error('--file-root must reference an existing directory')
     }
-    if (!(await stat(canonicalRoot)).isDirectory()) throw new Error('--file-root must reference a directory')
-    return canonicalRoot
+    const rootStat = await stat(canonicalRoot, { bigint: true })
+    if (!rootStat.isDirectory()) throw new Error('--file-root must reference a directory')
+    return { path: canonicalRoot, device: rootStat.dev, inode: rootStat.ino }
+}
+
+async function assertFileRootUnchanged(fileRoot: ValidatedFileRoot) {
+    try {
+        const currentPath = await realpath(fileRoot.path)
+        const currentStat = await stat(currentPath, { bigint: true })
+        if (
+            currentPath !== fileRoot.path ||
+            !currentStat.isDirectory() ||
+            currentStat.dev !== fileRoot.device ||
+            currentStat.ino !== fileRoot.inode
+        ) {
+            throw new Error('changed')
+        }
+    } catch {
+        throw new McpError(
+            ErrorCode.InvalidParams,
+            'Configured --file-root has changed since the bridge started; restart the bridge to authorize a new root',
+        )
+    }
+}
+
+function sameFile(
+    left: { dev: bigint; ino: bigint },
+    right: { dev: bigint; ino: bigint },
+) {
+    return left.dev === right.dev && left.ino === right.ino
+}
+
+async function readOpenedFileWithinLimit(
+    handle: Awaited<ReturnType<typeof open>>,
+    remainingBytes: number,
+) {
+    const chunks: Buffer[] = []
+    let bytesRead = 0
+    while (bytesRead <= remainingBytes) {
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remainingBytes + 1 - bytesRead))
+        const result = await handle.read(chunk, 0, chunk.length, null)
+        if (result.bytesRead === 0) break
+        chunks.push(chunk.subarray(0, result.bytesRead))
+        bytesRead += result.bytesRead
+    }
+    if (bytesRead > remainingBytes) {
+        throw new McpError(
+            ErrorCode.InvalidParams,
+            'Local attachments exceed the 6 MiB combined limit for an inline MCP request',
+        )
+    }
+    return Buffer.concat(chunks, bytesRead)
 }
 
 export async function resolveLocalFileAttachments(
     arguments_: JsonObject | undefined,
-    fileRoot: string,
+    fileRoot: ValidatedFileRoot,
 ): Promise<JsonObject | undefined> {
     if (!Array.isArray(arguments_?.attachments)) return arguments_
 
-    const canonicalRoot = await realpath(fileRoot)
+    await assertFileRootUnchanged(fileRoot)
+    const canonicalRoot = fileRoot.path
     let totalBytes = 0
     const attachments: unknown[] = []
     for (const [index, value] of arguments_.attachments.entries()) {
@@ -161,24 +218,45 @@ export async function resolveLocalFileAttachments(
             )
         }
 
-        const fileStat = await stat(candidate)
-        if (!fileStat.isFile()) {
-            throw new McpError(ErrorCode.InvalidParams, `attachments[${index}].path is not a regular file`)
+        let handle: Awaited<ReturnType<typeof open>>
+        try {
+            handle = await open(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+        } catch {
+            throw new McpError(ErrorCode.InvalidParams, `attachments[${index}].path changed or cannot be read`)
         }
-        totalBytes += fileStat.size
-        if (totalBytes > MAX_LOCAL_ATTACHMENT_BYTES) {
-            throw new McpError(
-                ErrorCode.InvalidParams,
-                'Local attachments exceed the 6 MiB combined limit for an inline MCP request',
-            )
-        }
+        try {
+            const openedStat = await handle.stat({ bigint: true })
+            if (!openedStat.isFile()) {
+                throw new McpError(ErrorCode.InvalidParams, `attachments[${index}].path is not a regular file`)
+            }
 
-        const { path: _path, ...metadata } = attachment
-        attachments.push({
-            ...metadata,
-            filename: attachment.filename ?? basename(attachment.path),
-            content: (await readFile(candidate)).toString('base64'),
-        })
+            // Validate the path again after opening, then only read through the validated handle.
+            // This prevents a symlink or rename swap between path validation and file reading.
+            const currentCandidate = await realpath(unresolved)
+            const currentStat = await stat(currentCandidate, { bigint: true })
+            await assertFileRootUnchanged(fileRoot)
+            if (
+                currentCandidate !== candidate ||
+                !isWithinRoot(canonicalRoot, currentCandidate) ||
+                !sameFile(openedStat, currentStat)
+            ) {
+                throw new McpError(ErrorCode.InvalidParams, `attachments[${index}].path changed while being read`)
+            }
+
+            const content = await readOpenedFileWithinLimit(handle, MAX_LOCAL_ATTACHMENT_BYTES - totalBytes)
+            totalBytes += content.length
+            const { path: _path, ...metadata } = attachment
+            attachments.push({
+                ...metadata,
+                filename: attachment.filename ?? basename(attachment.path),
+                content: content.toString('base64'),
+            })
+        } catch (error) {
+            if (error instanceof McpError) throw error
+            throw new McpError(ErrorCode.InvalidParams, `attachments[${index}].path changed or cannot be read`)
+        } finally {
+            await handle.close()
+        }
     }
 
     return { ...arguments_, attachments }
