@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -21,6 +21,7 @@ import {
     parseTools,
     resolveLocalFileAttachments,
     startBridge,
+    validateFileRoot,
 } from '../build/index.js'
 
 test('parses the compatibility tool filter', () => {
@@ -29,10 +30,15 @@ test('parses the compatibility tool filter', () => {
     assert.throws(() => parseTools(['--tools']), /requires a comma-separated list/)
 })
 
-test('requires an explicit local-file root', () => {
+test('requires an explicit, existing local-file root', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentmail-mcp-root-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
     assert.equal(parseFileRoot([]), undefined)
-    assert.equal(parseFileRoot(['--file-root', '/workspace']), '/workspace')
+    assert.equal(parseFileRoot(['--file-root', root]), root)
     assert.throws(() => parseFileRoot(['--file-root']), /requires a directory path/)
+    assert.equal(await validateFileRoot(root), await realpath(root))
+    await assert.rejects(validateFileRoot('relative/path'), /must be an absolute directory path/)
+    await assert.rejects(validateFileRoot(join(root, 'missing')), /must reference an existing directory/)
 })
 
 test('adds a local path variant to attachment-capable tools', () => {
@@ -47,14 +53,14 @@ test('adds a local path variant to attachment-capable tools', () => {
                         anyOf: [
                             {
                                 type: 'object',
-                                properties: { filename: { type: 'string' }, content: { type: 'string' } },
-                                required: ['content'],
+                                properties: { filename: { type: 'string' }, url: { type: 'string' } },
+                                required: ['url'],
                                 additionalProperties: false,
                             },
                             {
                                 type: 'object',
-                                properties: { filename: { type: 'string' }, url: { type: 'string' } },
-                                required: ['url'],
+                                properties: { filename: { type: 'string' }, content: { type: 'string' } },
+                                required: ['content'],
                                 additionalProperties: false,
                             },
                         ],
@@ -92,8 +98,33 @@ test('reads local attachments without putting their bytes in the client tool cal
 
     await assert.rejects(
         resolveLocalFileAttachments({ attachments: [{ path: '../outside.pdf' }] }, root),
-        /must resolve to a file inside/,
+        /is outside --file-root/,
     )
+
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: 'missing.pdf' }] }, root),
+        /does not exist or cannot be read/,
+    )
+
+    await writeFile(join(root, '.env'), 'SECRET=value')
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: '.env' }] }, root),
+        /cannot contain hidden files or directories/,
+    )
+
+    const hidden = join(root, '.private')
+    await mkdir(hidden)
+    await writeFile(join(hidden, 'secret.pdf'), '%PDF-secret')
+    await symlink(join(hidden, 'secret.pdf'), join(root, 'public-name.pdf'))
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: 'public-name.pdf' }] }, root),
+        /cannot resolve through hidden files or directories/,
+    )
+
+    await writeFile(join(root, 'real-name-v3.pdf'), '%PDF-real')
+    await symlink(join(root, 'real-name-v3.pdf'), join(root, 'report-alias.pdf'))
+    const aliased = await resolveLocalFileAttachments({ attachments: [{ path: 'report-alias.pdf' }] }, root)
+    assert.equal(aliased.attachments[0].filename, 'report-alias.pdf')
 })
 
 test('does not open stdio when the hosted connection fails', async () => {

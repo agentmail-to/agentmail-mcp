@@ -17,10 +17,7 @@ test('published artifact is an executable bridge without AgentMail implementatio
     assert.match(built, /X-AgentMail-MCP-Bridge/)
     assert.match(built, /node\/1\.1\.0/)
     assert.match(built, /agentmail-mcp-node\/1\.1\.0/)
-    // The bridge may adapt the contract of individual hosted tools (for example,
-    // resolving a local attachment path before forwarding send_message), but it
-    // must not bundle either AgentMail implementation package.
-    assert.doesNotMatch(built, /agentmail-toolkit|from ['"]agentmail['"]/)
+    assert.doesNotMatch(built, /agentmail-toolkit|from ['"]agentmail['"]|list_inboxes|send_message/)
     assert.ok((await stat(new URL('../build/index.js', import.meta.url))).mode & 0o111)
 
     const env = { ...process.env }
