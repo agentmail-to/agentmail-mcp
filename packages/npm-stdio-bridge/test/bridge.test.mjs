@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -12,12 +15,85 @@ import {
     ToolListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 
-import { parseTools, startBridge } from '../build/index.js'
+import {
+    addLocalFileAttachmentVariant,
+    parseFileRoot,
+    parseTools,
+    resolveLocalFileAttachments,
+    startBridge,
+} from '../build/index.js'
 
 test('parses the compatibility tool filter', () => {
     assert.equal(parseTools([]), undefined)
     assert.deepEqual([...parseTools(['--tools', 'one, two'])], ['one', 'two'])
     assert.throws(() => parseTools(['--tools']), /requires a comma-separated list/)
+})
+
+test('requires an explicit local-file root', () => {
+    assert.equal(parseFileRoot([]), undefined)
+    assert.equal(parseFileRoot(['--file-root', '/workspace']), '/workspace')
+    assert.throws(() => parseFileRoot(['--file-root']), /requires a directory path/)
+})
+
+test('adds a local path variant to attachment-capable tools', () => {
+    const tool = addLocalFileAttachmentVariant({
+        name: 'send_message',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                attachments: {
+                    type: 'array',
+                    items: {
+                        anyOf: [
+                            {
+                                type: 'object',
+                                properties: { filename: { type: 'string' }, content: { type: 'string' } },
+                                required: ['content'],
+                                additionalProperties: false,
+                            },
+                            {
+                                type: 'object',
+                                properties: { filename: { type: 'string' }, url: { type: 'string' } },
+                                required: ['url'],
+                                additionalProperties: false,
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+    })
+
+    const variants = tool.inputSchema.properties.attachments.items.anyOf
+    assert.equal(variants.length, 3)
+    assert.deepEqual(variants[2].required, ['path'])
+    assert.deepEqual(Object.keys(variants[2].properties), ['filename', 'path'])
+})
+
+test('reads local attachments without putting their bytes in the client tool call', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentmail-mcp-bridge-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const file = join(root, 'report.pdf')
+    await writeFile(file, Buffer.from('%PDF-local-test'))
+
+    const resolved = await resolveLocalFileAttachments(
+        {
+            attachments: [{ path: 'report.pdf', contentType: 'application/pdf' }],
+        },
+        root,
+    )
+    assert.deepEqual(resolved.attachments, [
+        {
+            filename: 'report.pdf',
+            contentType: 'application/pdf',
+            content: Buffer.from('%PDF-local-test').toString('base64'),
+        },
+    ])
+
+    await assert.rejects(
+        resolveLocalFileAttachments({ attachments: [{ path: '../outside.pdf' }] }, root),
+        /must resolve to a file inside/,
+    )
 })
 
 test('does not open stdio when the hosted connection fails', async () => {

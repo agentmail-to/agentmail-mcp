@@ -11,7 +11,10 @@ for (const dependency of ['agentmail', 'agentmail-toolkit']) {
   }
 }
 
-const forbidden = /AgentMailClient|AgentMailToolkit|agentmail-toolkit|(?:^|["'`])\/v0\/|inputSchema|outputSchema/
+// Bridges still cannot embed the AgentMail API or toolkit implementation. The
+// npm bridge intentionally adapts hosted attachment schemas when --file-root is
+// configured, so inputSchema/outputSchema are no longer useful boundary checks.
+const forbidden = /AgentMailClient|AgentMailToolkit|agentmail-toolkit|(?:^|["'`])\/v0\//
 for (const directory of [
   new URL('packages/npm-stdio-bridge/src', root),
   new URL('python/stdio-bridge/src', root),
