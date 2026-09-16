@@ -41,16 +41,19 @@ const coreTools = [
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
   //
-  // Provider marketplace and catalog additions come from agentmail-toolkit 0.7.0.
+  // Provider marketplace, catalog additions, and the inbox allow/block lists
+  // come from agentmail-toolkit 0.8.0.
   'list_providers',
   'search_providers',
   'get_provider',
   'list_accounts',
   'connect_provider',
-  'get_provider_connection',
   'get_message',
   'search_inboxes',
-  'unblock_recipient',
+  'list_list_entries',
+  'get_list_entry',
+  'create_list_entry',
+  'delete_list_entry',
 ]
 const oauthTools = ['list_organizations', 'select_organization']
 // Always empty now: credential requirements are enforced by the API, not
