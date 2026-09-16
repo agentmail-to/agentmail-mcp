@@ -5,7 +5,9 @@ packages:
 # deps already declare (ajv wants fast-uri ^3.0.1, express-rate-limit wants ip-address ^10.2.0),
 # so this pins the floor rather than forcing an incompatible version. Without it a future
 # lockfile refresh can resolve back down into the vulnerable range.
-#   fast-uri   <3.1.5   GHSA-7p8r-x3mc-p8w7  host confusion via backslash authority introducer
+#   fast-uri   <3.1.6   GHSA-5jgf-p345-68v8, GHSA-f65p-4m7j-42xc,
+#                             GHSA-fph4-wmhf-6fwf, GHSA-jqff-g426-hqxp
+#                             host confusion and SSRF normalization flaws
 #   ip-address <10.3.1  GHSA-mwp4-54f8-5fhr  leading-zero octet decoding, SSRF / trust-boundary bypass
 #
 # The hono pair is the same shape: the sdk declares hono ^4.11.4 and @hono/node-server ^1.19.9, so
@@ -16,7 +18,7 @@ packages:
 #                               GHSA-8j4g-w8fx-2239  ReDoS in CORS middleware via ACRH
 #   @hono/node-server <1.19.15  GHSA-frvp-7c67-39w9  serve-static path traversal on Windows
 overrides:
-  fast-uri: ^3.1.5
+  fast-uri: ^3.1.6
   ip-address: ^10.3.1
   hono: ^4.12.34
   '@hono/node-server': ^1.19.15
