@@ -69,6 +69,25 @@ test('malformed Authorization headers get a 401 challenge instead of crashing th
   assert.equal((await health.json()).clerk_enabled, true)
 })
 
+test('protected-resource metadata advertises offline_access so clients request a refresh token', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+
+  // Without `offline_access` in scopes_supported, a client that reads our
+  // advertised scopes and requests only those never asks Clerk for a refresh
+  // token with offline-refresh semantics, so the session cannot be silently
+  // renewed after the access token expires (issue #50).
+  const res = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`)
+  assert.equal(res.status, 200)
+  const metadata = await res.json()
+  assert.ok(
+    metadata.scopes_supported.includes('offline_access'),
+    `scopes_supported must include offline_access, got: ${JSON.stringify(metadata.scopes_supported)}`,
+  )
+})
+
 test('am_ API keys sent as Bearer tokens still route to the API-key path', async (t) => {
   const server = app.listen(0)
   t.after(() => server.close())

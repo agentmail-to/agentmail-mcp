@@ -1691,8 +1691,15 @@ if (CLERK_ENABLED) {
     // resolveClerkConsoleJwt path 3/4. (An earlier fix tried advertising the
     // scope only to Claude via User-Agent; dropped because Claude's real
     // discovery UA — python-httpx / empty / Chrome — isn't distinguishable.)
+    //
+    // `offline_access` is advertised so clients request a refresh token with
+    // offline-refresh semantics. Without it, a client that reads our advertised
+    // scopes and requests only those never asks Clerk for `offline_access`, and
+    // the refresh token it receives cannot silently renew the session once the
+    // access token expires — the session drops to signed-out and the client
+    // must re-authenticate. See https://github.com/agentmail-to/agentmail-mcp/issues/50.
     const protectedResourceHandler = protectedResourceHandlerClerk({
-        scopes_supported: ['openid', 'email', 'profile'],
+        scopes_supported: ['openid', 'email', 'profile', 'offline_access'],
     })
     app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandler)
     app.get('/.well-known/oauth-protected-resource', protectedResourceHandler)
