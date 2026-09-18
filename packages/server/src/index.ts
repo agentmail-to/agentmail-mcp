@@ -374,20 +374,38 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
     return signConsoleJwt(internalOrgId)
 }
 
+/**
+ * The one client a tool call runs on, whichever credential it authenticated
+ * with: bound to the call's cancellation (see fetchBoundTo) and without SDK
+ * retries.
+ *
+ * The SDK's fetcher retries 408/429/5xx and sleeps min(Retry-After, 60 s)
+ * before each of its two retries, and that sleep is not abort-aware. A tool
+ * call has REQUEST_TIMEOUT_MS to answer, so a 429 whose Retry-After is the
+ * time left in a quota window (the new-sender recipient ramp sets up to an
+ * hour) sleeps straight through the budget: the connection is destroyed, the
+ * MCP client reports a timeout, and the API's explanation of the cap never
+ * reaches it. With no retries the error body comes straight back, and it
+ * says when a retry can succeed; the MCP client decides whether to make one.
+ */
+function buildClient(apiKey: string, signal?: AbortSignal): AgentMailClient {
+    return new AgentMailClient({
+        environment: AGENTMAIL_API_URL
+            ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
+            : undefined,
+        apiKey,
+        fetch: fetchBoundTo(signal),
+        maxRetries: 0,
+    })
+}
+
 /** Build an AgentMailClient backed by the resolved console JWT (see above). */
 async function buildClientFromClerkUser(
     clerkUserId: string,
     selectedClerkOrgId?: string,
     signal?: AbortSignal
 ): Promise<AgentMailClient> {
-    const consoleJwt = await resolveClerkConsoleJwt(clerkUserId, selectedClerkOrgId)
-    return new AgentMailClient({
-        environment: AGENTMAIL_API_URL
-            ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
-            : undefined,
-        apiKey: consoleJwt,
-        fetch: fetchBoundTo(signal),
-    })
+    return buildClient(await resolveClerkConsoleJwt(clerkUserId, selectedClerkOrgId), signal)
 }
 
 /**
@@ -419,13 +437,7 @@ function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined
  * Build an AgentMailClient from a raw API key (legacy path).
  */
 function buildClientFromApiKey(apiKey: string, signal?: AbortSignal): AgentMailClient {
-    return new AgentMailClient({
-        environment: AGENTMAIL_API_URL
-            ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
-            : undefined,
-        apiKey,
-        fetch: fetchBoundTo(signal),
-    })
+    return buildClient(apiKey, signal)
 }
 
 // ============================================================================
