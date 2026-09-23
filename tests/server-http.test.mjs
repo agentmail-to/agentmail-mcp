@@ -147,7 +147,43 @@ test('MCP body-parser client errors retain a safe HTTP status and JSON-RPC respo
   assert.match(res.headers.get('content-type') ?? '', /application\/json/)
   assert.deepEqual(await res.json(), {
     jsonrpc: '2.0',
-    error: { code: -32600, message: 'Unsupported request encoding' },
+    error: { code: -32600, message: 'Unsupported media type' },
+    id: null,
+  })
+})
+
+test('non-MCP route failures never expose diagnostics even in development', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+  const previousEnv = app.get('env')
+  app.set('env', 'development')
+  t.after(() => app.set('env', previousEnv))
+  t.mock.method(process, 'memoryUsage', () => {
+    throw new Error('private health diagnostic /srv/app/secret.ts:42')
+  })
+
+  const res = await fetch(`http://127.0.0.1:${port}/health`)
+  assert.equal(res.status, 500)
+  assert.match(res.headers.get('content-type') ?? '', /application\/json/)
+  assert.deepEqual(await res.json(), { error: 'Internal server error' })
+})
+
+test('unsupported JSON charset returns a sanitized media type error', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json; charset=iso-8859-1' },
+    body: '{}',
+  })
+  assert.equal(res.status, 415)
+  assert.deepEqual(await res.json(), {
+    jsonrpc: '2.0',
+    error: { code: -32600, message: 'Unsupported media type' },
     id: null,
   })
 })

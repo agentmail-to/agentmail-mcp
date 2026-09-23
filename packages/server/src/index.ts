@@ -1727,13 +1727,14 @@ const mcpErrorBoundary: express.ErrorRequestHandler = (error, req, res, next) =>
         : isBodyTooLarge
           ? 'Request too large'
           : status === 415
-            ? 'Unsupported request encoding'
+            ? 'Unsupported media type'
             : status < 500
               ? 'Invalid request'
               : 'Internal error'
 
-    const errorName = error instanceof Error ? error.name : 'UnknownError'
-    console.warn(`[http] MCP request failed (${errorName}), returning sanitized JSON-RPC error`)
+    if (status >= 500) {
+        console.error('[http] MCP request failed, returning sanitized JSON-RPC error')
+    }
     res.status(status).json({
         jsonrpc: '2.0',
         error: { code, message },
@@ -1813,6 +1814,15 @@ app.get('/health', (_req, res) => {
         cpu: cpuPct,
     })
 })
+
+// Keep errors from every route sanitized even when NODE_ENV is unset. This
+// must follow all routes, including OAuth discovery and health checks.
+const httpErrorBoundary: express.ErrorRequestHandler = (_error, _req, res, next) => {
+    if (res.headersSent) return next(_error)
+    console.error('[http] Request failed, returning sanitized error')
+    res.status(500).json({ error: 'Internal server error' })
+}
+app.use(httpErrorBoundary)
 
 // ============================================================================
 // Heap pressure telemetry
