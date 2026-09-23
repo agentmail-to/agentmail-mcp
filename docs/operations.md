@@ -6,11 +6,11 @@ Before promotion, record real baseline health, latency, authenticated completion
 
 ## Clerk OAuth configuration
 
-The hosted server advertises `openid`, `email`, and `profile` through protected-resource metadata. Some clients, including ChatGPT, omit `scope` during dynamic client registration and rely on Clerk's instance defaults. Production must therefore keep all of these settings:
+The hosted server advertises `openid`, `email`, `profile`, and `user:org:read` through protected-resource metadata. MCP SDK clients copy that list into their dynamic client registration and request it at authorization; Clerk rejects the whole authorization with `invalid_scope` if the client was not allowed any one of them. Some clients, including ChatGPT, omit `scope` during registration and are granted Clerk's instance defaults instead. Production must therefore keep all of these settings:
 
 - Dynamic OAuth client registration enabled
 - JWT access tokens enabled
-- Default scopes containing `openid`, `email`, and `profile`
+- Default scopes for dynamic clients containing `openid`, `email`, `profile`, and `user:org:read` (Clerk Dashboard → OAuth applications → Settings)
 
 Check an instance without changing it:
 
@@ -18,7 +18,9 @@ Check an instance without changing it:
 CLERK_SECRET_KEY=sk_live_... pnpm check:oauth-config
 ```
 
-Changing the defaults only fixes future registrations. Existing OAuth applications that were registered without `openid` must be updated to include it or re-registered; otherwise Clerk rejects ChatGPT's authorization request with `invalid_scope`.
+`user:org:read` is what puts the user's consent-screen organization choice into the token as `org_id`; without it, multi-org users fall back to the `select_organization` tool.
+
+Changing the defaults only fixes future registrations. A client registered before a scope was allowed keeps its original allowed set, so advertising a new scope breaks every existing installation on its next authorization until those clients are backfilled. `user:org:read` was advertised from 2026-05-08 and withdrawn on 2026-06-18 for exactly this reason. Re-enabling it requires Clerk to backfill the scope onto the existing dynamic clients (~279k in production as of 2026-09-21; Clerk runs the backfill, and the Backend API cannot address a dynamic client by its `client_id`). Sequence the re-enable so no client is registered in the gap: deploy the metadata change first, then have Clerk backfill every dynamic client created before that deploy.
 
 Keep human GET navigation separate from MCP protocol traffic. Human pages may redirect to documentation. Authenticated MCP POST requests must stay on the same runtime or be served by a protocol alias, not redirected across origins.
 
