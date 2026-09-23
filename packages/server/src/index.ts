@@ -1020,6 +1020,16 @@ export const app = express()
 // below provides a stronger fallback using the MCP_PUBLIC_URL env var.
 app.set('trust proxy', true)
 
+// HSTS is set by Express on every response handled by the app, including its
+// own health checks and malformed-request errors. The edge redirects cleartext
+// HTTP before requests reach this process; gateway-served paths are configured
+// separately at the edge.
+const STRICT_TRANSPORT_SECURITY = 'max-age=31536000; includeSubDomains; preload'
+app.use((_req, res, next) => {
+    res.setHeader('Strict-Transport-Security', STRICT_TRANSPORT_SECURITY)
+    next()
+})
+
 // Normalize req.headers.host to MCP_PUBLIC_URL if set. Must run BEFORE cors
 // and the Clerk auth boundary so downstream auth sees the normalized URL.
 app.use(publicUrlOverride)
@@ -1683,6 +1693,54 @@ const mcpPipeline = [
 ]
 app.all('/mcp', ...mcpPipeline)
 app.all('/', ...mcpPipeline)
+
+// Body parsing happens inside the MCP pipeline so admission control can shed
+// requests before parsing large payloads. Express routes parser failures to
+// the default error page unless an error handler follows the route; keep those
+// failures in JSON-RPC form and never return parser diagnostics or stack paths.
+const mcpErrorBoundary: express.ErrorRequestHandler = (error, req, res, next) => {
+    // Match Express's default case-insensitive, non-strict route behavior:
+    // `/MCP` and `/mcp/` are valid aliases for the `/mcp` route.
+    if (req.path !== '/' && !/^\/mcp\/?$/i.test(req.path)) return next(error)
+    if (res.headersSent) return next(error)
+
+    const errorType =
+        typeof error === 'object' && error !== null && 'type' in error ? error.type : undefined
+    const isParseError = errorType === 'entity.parse.failed'
+    const isBodyTooLarge = errorType === 'entity.too.large'
+    const reportedStatus =
+        typeof error === 'object' && error !== null
+            ? 'status' in error
+                ? error.status
+                : 'statusCode' in error
+                  ? error.statusCode
+                  : undefined
+            : undefined
+    const clientErrorStatus =
+        typeof reportedStatus === 'number' && reportedStatus >= 400 && reportedStatus < 500
+            ? reportedStatus
+            : undefined
+    const status = isParseError ? 400 : isBodyTooLarge ? 413 : (clientErrorStatus ?? 500)
+    const code = isParseError ? -32700 : status < 500 ? -32600 : -32603
+    const message = isParseError
+        ? 'Parse error'
+        : isBodyTooLarge
+          ? 'Request too large'
+          : status === 415
+            ? 'Unsupported request encoding'
+            : status < 500
+              ? 'Invalid request'
+              : 'Internal error'
+
+    const errorName = error instanceof Error ? error.name : 'UnknownError'
+    console.warn(`[http] MCP request failed (${errorName}), returning sanitized JSON-RPC error`)
+    res.status(status).json({
+        jsonrpc: '2.0',
+        error: { code, message },
+        id: null,
+    })
+}
+app.use(mcpErrorBoundary)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {

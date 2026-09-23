@@ -12,6 +12,10 @@ test('health identifies the build and human MCP navigation redirects before auth
   const { port } = server.address()
 
   const health = await fetch(`http://127.0.0.1:${port}/health`)
+  assert.equal(
+    health.headers.get('strict-transport-security'),
+    'max-age=31536000; includeSubDomains; preload'
+  )
   const { heap, requests, sockets, tcp, cpu, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
@@ -95,4 +99,55 @@ test('stateless server sheds GET SSE and DELETE with 405 before building any per
     body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
   })
   assert.equal(ping.status, 200)
+})
+
+test('malformed unauthenticated JSON gets a sanitized JSON-RPC error for Express MCP route aliases', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+
+  for (const path of ['/', '/mcp', '/mcp/', '/MCP', '/MCP/']) {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    })
+
+    assert.equal(res.status, 400)
+    assert.match(res.headers.get('content-type') ?? '', /application\/json/)
+    assert.equal(
+      res.headers.get('strict-transport-security'),
+      'max-age=31536000; includeSubDomains; preload'
+    )
+    assert.deepEqual(await res.json(), {
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Parse error' },
+      id: null,
+    })
+  }
+})
+
+test('MCP body-parser client errors retain a safe HTTP status and JSON-RPC response', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'content-encoding': 'compress',
+    },
+    body: '{}',
+  })
+
+  assert.equal(res.status, 415)
+  assert.match(res.headers.get('content-type') ?? '', /application\/json/)
+  assert.deepEqual(await res.json(), {
+    jsonrpc: '2.0',
+    error: { code: -32600, message: 'Unsupported request encoding' },
+    id: null,
+  })
 })
