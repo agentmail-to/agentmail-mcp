@@ -1024,7 +1024,7 @@ app.set('trust proxy', true)
 // own health checks and malformed-request errors. The edge redirects cleartext
 // HTTP before requests reach this process; gateway-served paths are configured
 // separately at the edge.
-const STRICT_TRANSPORT_SECURITY = 'max-age=31536000; includeSubDomains; preload'
+const STRICT_TRANSPORT_SECURITY = 'max-age=31536000; includeSubDomains'
 app.use((_req, res, next) => {
     res.setHeader('Strict-Transport-Security', STRICT_TRANSPORT_SECURITY)
     next()
@@ -1681,6 +1681,45 @@ const pingFastPath: express.RequestHandler = (req, res, next) => {
     res.status(200).json({ jsonrpc: '2.0', id, result: {} })
 }
 
+export function mapMcpRequestError(error: unknown): { status: number; code: number; message: string } {
+    const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
+    const errorType = details.type
+    if (errorType === 'entity.parse.failed') return { status: 400, code: -32700, message: 'Parse error' }
+    if (errorType === 'entity.too.large') return { status: 413, code: -32600, message: 'Request too large' }
+
+    let reportedStatus: unknown
+    if (typeof details.status === 'number') {
+        reportedStatus = details.status
+    } else if (typeof details.statusCode === 'number') {
+        reportedStatus = details.statusCode
+    }
+
+    let status = 500
+    if (typeof reportedStatus === 'number' && reportedStatus >= 400 && reportedStatus < 500) {
+        status = reportedStatus
+    }
+
+    if (status === 415) return { status, code: -32600, message: 'Unsupported request encoding' }
+    if (status < 500) return { status, code: -32600, message: 'Invalid request' }
+    return { status: 500, code: -32603, message: 'Internal error' }
+}
+
+// This boundary is attached only to the MCP routes below, so parser failures
+// are scoped by Express routing rather than a second copy of its path rules.
+const mcpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) => {
+    if (res.headersSent) return next(error)
+
+    const result = mapMcpRequestError(error)
+    if (result.status >= 500) {
+        console.error('[http] MCP request failed, returning sanitized JSON-RPC error')
+    }
+    res.status(result.status).json({
+        jsonrpc: '2.0',
+        error: { code: result.code, message: result.message },
+        id: null,
+    })
+}
+
 const mcpPipeline = [
     statelessMethodGuard,
     admissionControl,
@@ -1691,57 +1730,8 @@ const mcpPipeline = [
     authRouter,
     mcpHandler,
 ]
-app.all('/mcp', ...mcpPipeline)
-app.all('/', ...mcpPipeline)
-
-// Body parsing happens inside the MCP pipeline so admission control can shed
-// requests before parsing large payloads. Express routes parser failures to
-// the default error page unless an error handler follows the route; keep those
-// failures in JSON-RPC form and never return parser diagnostics or stack paths.
-const mcpErrorBoundary: express.ErrorRequestHandler = (error, req, res, next) => {
-    // Match Express's default case-insensitive, non-strict route behavior:
-    // `/MCP` and `/mcp/` are valid aliases for the `/mcp` route.
-    if (req.path !== '/' && !/^\/mcp\/?$/i.test(req.path)) return next(error)
-    if (res.headersSent) return next(error)
-
-    const errorType =
-        typeof error === 'object' && error !== null && 'type' in error ? error.type : undefined
-    const isParseError = errorType === 'entity.parse.failed'
-    const isBodyTooLarge = errorType === 'entity.too.large'
-    const reportedStatus =
-        typeof error === 'object' && error !== null
-            ? 'status' in error
-                ? error.status
-                : 'statusCode' in error
-                  ? error.statusCode
-                  : undefined
-            : undefined
-    const clientErrorStatus =
-        typeof reportedStatus === 'number' && reportedStatus >= 400 && reportedStatus < 500
-            ? reportedStatus
-            : undefined
-    const status = isParseError ? 400 : isBodyTooLarge ? 413 : (clientErrorStatus ?? 500)
-    const code = isParseError ? -32700 : status < 500 ? -32600 : -32603
-    const message = isParseError
-        ? 'Parse error'
-        : isBodyTooLarge
-          ? 'Request too large'
-          : status === 415
-            ? 'Unsupported media type'
-            : status < 500
-              ? 'Invalid request'
-              : 'Internal error'
-
-    if (status >= 500) {
-        console.error('[http] MCP request failed, returning sanitized JSON-RPC error')
-    }
-    res.status(status).json({
-        jsonrpc: '2.0',
-        error: { code, message },
-        id: null,
-    })
-}
-app.use(mcpErrorBoundary)
+app.all('/mcp', ...mcpPipeline, mcpErrorBoundary)
+app.all('/', ...mcpPipeline, mcpErrorBoundary)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
@@ -1817,8 +1807,8 @@ app.get('/health', (_req, res) => {
 
 // Keep errors from every route sanitized even when NODE_ENV is unset. This
 // must follow all routes, including OAuth discovery and health checks.
-const httpErrorBoundary: express.ErrorRequestHandler = (_error, _req, res, next) => {
-    if (res.headersSent) return next(_error)
+const httpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) => {
+    if (res.headersSent) return next(error)
     console.error('[http] Request failed, returning sanitized error')
     res.status(500).json({ error: 'Internal server error' })
 }

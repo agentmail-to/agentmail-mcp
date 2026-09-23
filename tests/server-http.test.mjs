@@ -3,7 +3,7 @@ import test from 'node:test'
 
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.BUILD_SHA = 'test-sha'
-const { app } = await import('../packages/server/build/index.js')
+const { app, mapMcpRequestError } = await import('../packages/server/build/index.js')
 
 test('health identifies the build and human MCP navigation redirects before auth', async (t) => {
   const server = app.listen(0)
@@ -14,7 +14,7 @@ test('health identifies the build and human MCP navigation redirects before auth
   const health = await fetch(`http://127.0.0.1:${port}/health`)
   assert.equal(
     health.headers.get('strict-transport-security'),
-    'max-age=31536000; includeSubDomains; preload'
+    'max-age=31536000; includeSubDomains'
   )
   const { heap, requests, sockets, tcp, cpu, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
@@ -101,7 +101,7 @@ test('stateless server sheds GET SSE and DELETE with 405 before building any per
   assert.equal(ping.status, 200)
 })
 
-test('malformed unauthenticated JSON gets a sanitized JSON-RPC error for Express MCP route aliases', async (t) => {
+test('malformed unauthenticated JSON gets a sanitized JSON-RPC error for registered MCP route aliases', async (t) => {
   const server = app.listen(0)
   t.after(() => server.close())
   await new Promise((resolve) => server.once('listening', resolve))
@@ -118,7 +118,7 @@ test('malformed unauthenticated JSON gets a sanitized JSON-RPC error for Express
     assert.match(res.headers.get('content-type') ?? '', /application\/json/)
     assert.equal(
       res.headers.get('strict-transport-security'),
-      'max-age=31536000; includeSubDomains; preload'
+      'max-age=31536000; includeSubDomains'
     )
     assert.deepEqual(await res.json(), {
       jsonrpc: '2.0',
@@ -147,7 +147,7 @@ test('MCP body-parser client errors retain a safe HTTP status and JSON-RPC respo
   assert.match(res.headers.get('content-type') ?? '', /application\/json/)
   assert.deepEqual(await res.json(), {
     jsonrpc: '2.0',
-    error: { code: -32600, message: 'Unsupported media type' },
+    error: { code: -32600, message: 'Unsupported request encoding' },
     id: null,
   })
 })
@@ -170,7 +170,7 @@ test('non-MCP route failures never expose diagnostics even in development', asyn
   assert.deepEqual(await res.json(), { error: 'Internal server error' })
 })
 
-test('unsupported JSON charset returns a sanitized media type error', async (t) => {
+test('unsupported JSON charset returns a sanitized encoding error', async (t) => {
   const server = app.listen(0)
   t.after(() => server.close())
   await new Promise((resolve) => server.once('listening', resolve))
@@ -183,7 +183,30 @@ test('unsupported JSON charset returns a sanitized media type error', async (t) 
   assert.equal(res.status, 415)
   assert.deepEqual(await res.json(), {
     jsonrpc: '2.0',
-    error: { code: -32600, message: 'Unsupported media type' },
+    error: { code: -32600, message: 'Unsupported request encoding' },
     id: null,
+  })
+})
+
+test('MCP error mapping distinguishes parse failures and preserves other client statuses', () => {
+  assert.deepEqual(mapMcpRequestError({ status: 400, type: 'entity.verify.failed' }), {
+    status: 400,
+    code: -32600,
+    message: 'Invalid request',
+  })
+  assert.deepEqual(mapMcpRequestError({ status: 400, type: 'entity.parse.failed' }), {
+    status: 400,
+    code: -32700,
+    message: 'Parse error',
+  })
+  assert.deepEqual(mapMcpRequestError({ statusCode: 401 }), {
+    status: 401,
+    code: -32600,
+    message: 'Invalid request',
+  })
+  assert.deepEqual(mapMcpRequestError({ status: 413, type: 'entity.too.large' }), {
+    status: 413,
+    code: -32600,
+    message: 'Request too large',
   })
 })
