@@ -246,16 +246,18 @@ export async function getInternalOrganizationId(
  * Extract the `org_id` claim from a Clerk OAuth access token.
  *
  * Clerk surfaces the user's selected organization as the `org_id` claim
- * when the OAuth app was granted the `user:org:read` scope AND the user
+ * when the OAuth client was granted the `user:org:read` scope AND the user
  * picked an org on the consent screen (Clerk early-access feature, rolled
  * out April 2026). The @clerk/mcp-tools mcpAuthClerk wrapper does NOT
  * propagate this claim into the AuthInfo object — only userId is exposed
  * via extra — so we decode the raw JWT payload ourselves.
  *
- * Returns undefined for tokens issued before user:org:read was enabled,
- * tokens that omit the claim, or any decode failure. Callers must handle
- * the undefined case via membership lookup, with a strict multi-org
- * fallback to avoid silently picking the wrong org.
+ * Returns undefined for tokens from clients that were never granted
+ * user:org:read (registrations that predate the scope, or sessions
+ * authorized while it was not advertised), tokens that omit the claim, or
+ * any decode failure. Callers must handle the undefined case via membership
+ * lookup, with a strict multi-org fallback to avoid silently picking the
+ * wrong org.
  */
 function extractOrgIdFromClerkToken(token: string | undefined): string | undefined {
     if (!token) return undefined
@@ -301,8 +303,9 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  * Selection rules (in precedence order):
  *   1. If `selectedClerkOrgId` is provided (token carried an `org_id` claim —
  *      the user picked an org on the Clerk consent screen): use it. Validate
- *      membership defensively. Currently only Claude's privileged app can emit
- *      this; DCR clients never do (Clerk doesn't grant them user:org:read).
+ *      membership defensively. Any client granted `user:org:read` emits this;
+ *      see the PRM scopes_supported comment in the route mount for which
+ *      clients that is.
  *   2. Else if the user belongs to exactly one org: use it (single-org users
  *      never need to choose).
  *   3. Else (multi-org user) consult the org they picked via `select_organization`
@@ -316,8 +319,8 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  * organization during sign-up. The MCP server does not create organizations;
  * users recover through the console's manual setup flow.
  *
- * This makes multi-org work for every client (Claude/Cursor/Codex) without
- * depending on the Clerk consent-screen org picker or per-client UA hacks.
+ * Paths 3/4 keep multi-org working for any session whose token carries no
+ * org_id, so the consent-screen picker is an improvement, not a dependency.
  */
 async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: string): Promise<string> {
     const memberships = await clerkClient.users.getOrganizationMembershipList({
@@ -640,10 +643,11 @@ export function createMcpServer(auth: AuthSource): McpServer {
     }
 
     // Org-selection tools (Clerk OAuth only). Let a multi-org user choose which
-    // org their mail operations target, without relying on the Clerk consent
-    // picker (which DCR clients can't use) or any per-client UA hack. The choice
-    // persists in Clerk privateMetadata and applies to all future requests until
-    // changed. See resolveClerkConsoleJwt path 3/4.
+    // org their mail operations target when their token carries no org_id —
+    // a client that predates the `user:org:read` grant, or a session
+    // authorized while the scope was not advertised. The choice persists in
+    // Clerk privateMetadata and applies to all future requests until changed.
+    // See resolveClerkConsoleJwt path 3/4.
     if (CLERK_ENABLED) {
         const NON_CLERK_MSG =
             'Organization selection only applies to OAuth (Clerk) sessions. ' +
@@ -1762,25 +1766,32 @@ app.all('/', ...mcpPipeline, mcpErrorBoundary)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
-    // Advertise the identity scopes supported by Clerk. `openid` is required
-    // by ChatGPT's OAuth client. Some DCR clients omit `scope` when registering,
-    // so Clerk's instance-level DCR defaults must also include openid, email,
-    // and profile; otherwise the later authorization request fails with
-    // invalid_scope. Verify the Clerk setting with `pnpm check:oauth-config`.
+    // Advertise the identity scopes supported by Clerk. MCP SDK clients copy
+    // this list verbatim into their DCR registration request and then request
+    // it at authorization, so every scope here must be one Clerk actually
+    // grants to dynamically registered clients — a scope a client was never
+    // allowed fails the whole authorization with invalid_scope, not just that
+    // scope. `openid` is required by ChatGPT's OAuth client.
     //
-    // We deliberately do NOT advertise `user:org:read`: dynamically registered
-    // clients are not granted it by default, so advertising it caused clients
-    // (Cursor, Codex, etc.) to request a scope that Clerk rejected at consent —
-    // broken OAuth onboarding since 2026-05-08.
+    // `user:org:read` puts the org the user picks on the Clerk consent screen
+    // into the token's `org_id` claim (resolveClerkConsoleJwt path 1). It was
+    // advertised 2026-05-08 → 2026-06-18 and pulled because Clerk did not grant
+    // it to DCR clients (Cursor, Codex, ...), which broke their OAuth
+    // onboarding. Clerk closed that gap (verified end-to-end on dev,
+    // 2026-09-21: a DCR client registered with the scope gets the picker and
+    // an `org_id`). Two conditions remain, both outside this repo:
+    //   - Clerk's instance defaults for dynamic clients must include it, for
+    //     clients that omit `scope` at registration (ChatGPT) —
+    //     `pnpm check:oauth-config` verifies this.
+    //   - Clients registered BEFORE the scope was allowed still fail with
+    //     invalid_scope when they request it, so this list must not ship
+    //     until Clerk has backfilled the existing dynamic clients. See
+    //     docs/operations.md.
     //
-    // Multi-org users no longer need the Clerk consent-screen org picker (which
-    // required user:org:read): they pick their org in-session via the
-    // `select_organization` MCP tool, which works for every client. See
-    // resolveClerkConsoleJwt path 3/4. (An earlier fix tried advertising the
-    // scope only to Claude via User-Agent; dropped because Claude's real
-    // discovery UA — python-httpx / empty / Chrome — isn't distinguishable.)
+    // `select_organization` (path 3/4) stays as the fallback for tokens that
+    // carry no `org_id`.
     const protectedResourceHandler = protectedResourceHandlerClerk({
-        scopes_supported: ['openid', 'email', 'profile'],
+        scopes_supported: ['openid', 'email', 'profile', 'user:org:read'],
     })
     app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandler)
     app.get('/.well-known/oauth-protected-resource', protectedResourceHandler)

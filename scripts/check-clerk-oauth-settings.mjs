@@ -2,7 +2,11 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SETTINGS_URL = 'https://api.clerk.com/v1/instance/oauth_application_settings'
-const REQUIRED_DEFAULT_SCOPES = ['openid', 'email', 'profile']
+// Must cover every scope the server advertises in protected-resource metadata:
+// clients that omit `scope` at registration (ChatGPT) are granted exactly these
+// defaults, then request the advertised list — anything advertised but not
+// defaulted fails their authorization with invalid_scope.
+const REQUIRED_DEFAULT_SCOPES = ['openid', 'email', 'profile', 'user:org:read']
 
 export function validateClerkOAuthSettings(settings) {
   const errors = []
@@ -39,7 +43,9 @@ async function main() {
     throw new Error(`Invalid Clerk OAuth settings: ${errors.join('; ')}`)
   }
 
-  console.log('Clerk OAuth settings OK: DCR and JWT access tokens enabled; required defaults present')
+  console.log(
+    `Clerk OAuth settings OK: DCR and JWT access tokens enabled; default scopes include ${REQUIRED_DEFAULT_SCOPES.join(', ')}`
+  )
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
