@@ -1020,6 +1020,16 @@ export const app = express()
 // below provides a stronger fallback using the MCP_PUBLIC_URL env var.
 app.set('trust proxy', true)
 
+// HSTS is set by Express on every response handled by the app, including its
+// own health checks and malformed-request errors. The edge redirects cleartext
+// HTTP before requests reach this process; gateway-served paths are configured
+// separately at the edge.
+const STRICT_TRANSPORT_SECURITY = 'max-age=31536000; includeSubDomains'
+app.use((_req, res, next) => {
+    res.setHeader('Strict-Transport-Security', STRICT_TRANSPORT_SECURITY)
+    next()
+})
+
 // Normalize req.headers.host to MCP_PUBLIC_URL if set. Must run BEFORE cors
 // and the Clerk auth boundary so downstream auth sees the normalized URL.
 app.use(publicUrlOverride)
@@ -1671,6 +1681,72 @@ const pingFastPath: express.RequestHandler = (req, res, next) => {
     res.status(200).json({ jsonrpc: '2.0', id, result: {} })
 }
 
+function reportedHttpClientErrorStatus(error: unknown): number | undefined {
+    const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
+    const reportedStatus = typeof details.status === 'number' ? details.status : details.statusCode
+    return typeof reportedStatus === 'number' && Number.isInteger(reportedStatus) && reportedStatus >= 400 && reportedStatus < 500
+        ? reportedStatus
+        : undefined
+}
+
+function httpErrorLogMetadata(error: unknown, status: number): Record<string, string | number> {
+    const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
+    const metadata: Record<string, string | number> = { status }
+    const safeToken = (value: unknown) =>
+        typeof value === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(value) ? value : undefined
+
+    for (const key of ['name', 'type', 'code'] as const) {
+        const value = safeToken(details[key])
+        if (value !== undefined) metadata[key] = value
+    }
+
+    if (status >= 500 && typeof details.stack === 'string') {
+        const stackFrames = details.stack
+            .split(/\r?\n/)
+            .slice(1)
+            .filter((line) => /^\s*at\s+/.test(line))
+            .slice(0, 8)
+            .map((line) => line.trim().slice(0, 240))
+        if (stackFrames.length > 0) metadata.stackFrames = stackFrames.join('\n')
+    }
+
+    // Parser errors may carry the raw request in `body`; retain bounded stack
+    // frames for 5xx diagnosis, but never log the Error, message, or body.
+    return metadata
+}
+
+export function mapMcpRequestError(error: unknown): { status: number; code: number; message: string } {
+    const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
+    const errorType = details.type
+    if (errorType === 'entity.parse.failed') return { status: 400, code: -32700, message: 'Parse error' }
+    if (errorType === 'entity.too.large') return { status: 413, code: -32600, message: 'Request too large' }
+
+    const status = reportedHttpClientErrorStatus(error) ?? 500
+
+    if (status === 415) return { status, code: -32600, message: 'Unsupported request encoding' }
+    if (status < 500) return { status, code: -32600, message: 'Invalid request' }
+    return { status: 500, code: -32603, message: 'Internal error' }
+}
+
+// This boundary is attached only to the MCP routes below, so parser failures
+// are scoped by Express routing rather than a second copy of its path rules.
+const mcpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) => {
+    if (res.headersSent) return next(error)
+
+    const result = mapMcpRequestError(error)
+    if (result.status >= 500) {
+        console.error(
+            '[http] MCP request failed, returning sanitized JSON-RPC error',
+            httpErrorLogMetadata(error, result.status)
+        )
+    }
+    res.status(result.status).json({
+        jsonrpc: '2.0',
+        error: { code: result.code, message: result.message },
+        id: null,
+    })
+}
+
 const mcpPipeline = [
     statelessMethodGuard,
     admissionControl,
@@ -1681,8 +1757,8 @@ const mcpPipeline = [
     authRouter,
     mcpHandler,
 ]
-app.all('/mcp', ...mcpPipeline)
-app.all('/', ...mcpPipeline)
+app.all('/mcp', ...mcpPipeline, mcpErrorBoundary)
+app.all('/', ...mcpPipeline, mcpErrorBoundary)
 
 // OAuth discovery metadata endpoints. Only mounted when Clerk is configured.
 if (CLERK_ENABLED) {
@@ -1755,6 +1831,21 @@ app.get('/health', (_req, res) => {
         cpu: cpuPct,
     })
 })
+
+// Keep errors from every route sanitized even when NODE_ENV is unset. This
+// must follow all routes, including OAuth discovery and health checks.
+const httpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) => {
+    if (res.headersSent) return next(error)
+    const status = reportedHttpClientErrorStatus(error) ?? 500
+    const metadata = httpErrorLogMetadata(error, status)
+    if (status >= 500) {
+        console.error('[http] Request failed, returning sanitized error', metadata)
+    } else {
+        console.warn('[http] Client request failed, returning sanitized error', metadata)
+    }
+    res.status(status).json({ error: status >= 500 ? 'Internal server error' : 'Request failed' })
+}
+app.use(httpErrorBoundary)
 
 // ============================================================================
 // Heap pressure telemetry
