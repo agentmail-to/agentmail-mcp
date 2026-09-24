@@ -1681,23 +1681,47 @@ const pingFastPath: express.RequestHandler = (req, res, next) => {
     res.status(200).json({ jsonrpc: '2.0', id, result: {} })
 }
 
+function reportedHttpClientErrorStatus(error: unknown): number | undefined {
+    const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
+    const reportedStatus = typeof details.status === 'number' ? details.status : details.statusCode
+    return typeof reportedStatus === 'number' && Number.isInteger(reportedStatus) && reportedStatus >= 400 && reportedStatus < 500
+        ? reportedStatus
+        : undefined
+}
+
+function httpErrorLogMetadata(error: unknown, status: number): Record<string, string | number> {
+    const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
+    const metadata: Record<string, string | number> = { status }
+    const safeToken = (value: unknown) =>
+        typeof value === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(value) ? value : undefined
+
+    for (const key of ['name', 'type', 'code'] as const) {
+        const value = safeToken(details[key])
+        if (value !== undefined) metadata[key] = value
+    }
+
+    if (status >= 500 && typeof details.stack === 'string') {
+        const stackFrames = details.stack
+            .split(/\r?\n/)
+            .slice(1)
+            .filter((line) => /^\s*at\s+/.test(line))
+            .slice(0, 8)
+            .map((line) => line.trim().slice(0, 240))
+        if (stackFrames.length > 0) metadata.stackFrames = stackFrames.join('\n')
+    }
+
+    // Parser errors may carry the raw request in `body`; retain bounded stack
+    // frames for 5xx diagnosis, but never log the Error, message, or body.
+    return metadata
+}
+
 export function mapMcpRequestError(error: unknown): { status: number; code: number; message: string } {
     const details = typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {}
     const errorType = details.type
     if (errorType === 'entity.parse.failed') return { status: 400, code: -32700, message: 'Parse error' }
     if (errorType === 'entity.too.large') return { status: 413, code: -32600, message: 'Request too large' }
 
-    let reportedStatus: unknown
-    if (typeof details.status === 'number') {
-        reportedStatus = details.status
-    } else if (typeof details.statusCode === 'number') {
-        reportedStatus = details.statusCode
-    }
-
-    let status = 500
-    if (typeof reportedStatus === 'number' && reportedStatus >= 400 && reportedStatus < 500) {
-        status = reportedStatus
-    }
+    const status = reportedHttpClientErrorStatus(error) ?? 500
 
     if (status === 415) return { status, code: -32600, message: 'Unsupported request encoding' }
     if (status < 500) return { status, code: -32600, message: 'Invalid request' }
@@ -1711,7 +1735,10 @@ const mcpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) =
 
     const result = mapMcpRequestError(error)
     if (result.status >= 500) {
-        console.error('[http] MCP request failed, returning sanitized JSON-RPC error')
+        console.error(
+            '[http] MCP request failed, returning sanitized JSON-RPC error',
+            httpErrorLogMetadata(error, result.status)
+        )
     }
     res.status(result.status).json({
         jsonrpc: '2.0',
@@ -1809,8 +1836,14 @@ app.get('/health', (_req, res) => {
 // must follow all routes, including OAuth discovery and health checks.
 const httpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) => {
     if (res.headersSent) return next(error)
-    console.error('[http] Request failed, returning sanitized error')
-    res.status(500).json({ error: 'Internal server error' })
+    const status = reportedHttpClientErrorStatus(error) ?? 500
+    const metadata = httpErrorLogMetadata(error, status)
+    if (status >= 500) {
+        console.error('[http] Request failed, returning sanitized error', metadata)
+    } else {
+        console.warn('[http] Client request failed, returning sanitized error', metadata)
+    }
+    res.status(status).json({ error: status >= 500 ? 'Internal server error' : 'Request failed' })
 }
 app.use(httpErrorBoundary)
 

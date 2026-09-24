@@ -160,6 +160,8 @@ test('non-MCP route failures never expose diagnostics even in development', asyn
   const previousEnv = app.get('env')
   app.set('env', 'development')
   t.after(() => app.set('env', previousEnv))
+  const errorLogs = []
+  t.mock.method(console, 'error', (...args) => errorLogs.push(args))
   t.mock.method(process, 'memoryUsage', () => {
     throw new Error('private health diagnostic /srv/app/secret.ts:42')
   })
@@ -168,6 +170,46 @@ test('non-MCP route failures never expose diagnostics even in development', asyn
   assert.equal(res.status, 500)
   assert.match(res.headers.get('content-type') ?? '', /application\/json/)
   assert.deepEqual(await res.json(), { error: 'Internal server error' })
+  assert.equal(errorLogs.length, 1)
+  assert.equal(errorLogs[0][0], '[http] Request failed, returning sanitized error')
+  assert.equal(errorLogs[0][1].status, 500)
+  assert.equal(errorLogs[0][1].name, 'Error')
+  assert.match(errorLogs[0][1].stackFrames, /server-http\.test\.mjs/)
+  assert.equal(JSON.stringify(errorLogs).includes('private health diagnostic'), false)
+})
+
+test('non-MCP client errors preserve 4xx status and log only safe metadata', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+  const errorLogs = []
+  const warningLogs = []
+  const marker = 'sensitive-request-marker'
+  t.mock.method(console, 'error', (...args) => errorLogs.push(args))
+  t.mock.method(console, 'warn', (...args) => warningLogs.push(args))
+  t.mock.method(process, 'memoryUsage', () => {
+    throw Object.assign(new Error(marker), {
+      statusCode: 429,
+      type: 'client.rate_limited',
+      code: 'ERATELIMIT',
+      body: marker,
+      headers: { authorization: marker },
+    })
+  })
+
+  const res = await fetch(`http://127.0.0.1:${port}/health`)
+  assert.equal(res.status, 429)
+  assert.match(res.headers.get('content-type') ?? '', /application\/json/)
+  assert.deepEqual(await res.json(), { error: 'Request failed' })
+  assert.deepEqual(errorLogs, [])
+  assert.deepEqual(warningLogs, [
+    [
+      '[http] Client request failed, returning sanitized error',
+      { status: 429, name: 'Error', type: 'client.rate_limited', code: 'ERATELIMIT' },
+    ],
+  ])
+  assert.equal(JSON.stringify(warningLogs).includes(marker), false)
 })
 
 test('unsupported JSON charset returns a sanitized encoding error', async (t) => {
