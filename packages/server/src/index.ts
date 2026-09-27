@@ -294,6 +294,31 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
     })
 }
 
+// Clerk's list endpoints return 10 rows unless asked for more; 500 is the
+// Backend API's per-page maximum. Every membership check must see ALL of a
+// user's organizations: with the default page, a user in more than 10 orgs who
+// picks one past the first page on the consent screen fails path-1 validation
+// on every tool call, and the org-selection tools can neither list nor select
+// it. Nobody realistically belongs to more than 500.
+export const ORG_MEMBERSHIP_PAGE_SIZE = 500
+
+type OrganizationMembershipPage = Awaited<
+    ReturnType<typeof clerkClient.users.getOrganizationMembershipList>
+>
+
+/** Every organization membership of a Clerk user. */
+export async function listUserOrgMemberships(
+    clerkUserId: string,
+    listMemberships: (params: {
+        userId: string
+        limit: number
+    }) => Promise<Pick<OrganizationMembershipPage, 'data'>> = (params) =>
+        clerkClient.users.getOrganizationMembershipList(params)
+): Promise<OrganizationMembershipPage['data']> {
+    const page = await listMemberships({ userId: clerkUserId, limit: ORG_MEMBERSHIP_PAGE_SIZE })
+    return page.data ?? []
+}
+
 /**
  * Resolve the console JWT for a Clerk OAuth user's selected org — the bearer
  * every AgentMail call on the OAuth path authenticates with. Kept separate from
@@ -323,10 +348,8 @@ async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<vo
  * org_id, so the consent-screen picker is an improvement, not a dependency.
  */
 async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: string): Promise<string> {
-    const memberships = await clerkClient.users.getOrganizationMembershipList({
-        userId: clerkUserId,
-    })
-    if (!memberships.data || memberships.data.length === 0) {
+    const memberships = await listUserOrgMemberships(clerkUserId)
+    if (memberships.length === 0) {
         throw new Error(
             'Your account has no AgentMail Organization yet. Sign in once at ' +
                 'https://console.agentmail.to to finish setup, then retry this tool.'
@@ -336,9 +359,7 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
     let chosenOrg
     if (selectedClerkOrgId) {
         // Path 1: token specified an org. Validate membership before trusting it.
-        const matching = memberships.data.find(
-            (m) => m.organization.id === selectedClerkOrgId
-        )
+        const matching = memberships.find((m) => m.organization.id === selectedClerkOrgId)
         if (!matching) {
             throw new Error(
                 `User ${clerkUserId} is not a member of organization ${selectedClerkOrgId}. ` +
@@ -346,22 +367,22 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
             )
         }
         chosenOrg = matching.organization
-    } else if (memberships.data.length === 1) {
+    } else if (memberships.length === 1) {
         // Path 2: single-org user. Safe to pick the only org.
-        chosenOrg = memberships.data[0]!.organization
+        chosenOrg = memberships[0]!.organization
     } else {
         // Path 3/4: multi-org user, no org_id in token. Use the org they picked
         // via `select_organization`; otherwise refuse and tell them to pick one.
         const storedOrgId = await getStoredMcpOrgId(clerkUserId)
         const matching = storedOrgId
-            ? memberships.data.find((m) => m.organization.id === storedOrgId)
+            ? memberships.find((m) => m.organization.id === storedOrgId)
             : undefined
         if (!matching) {
-            const orgList = memberships.data
+            const orgList = memberships
                 .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                 .join('\n')
             throw new Error(
-                `You belong to ${memberships.data.length} organizations and haven't selected one yet. ` +
+                `You belong to ${memberships.length} organizations and haven't selected one yet. ` +
                     `Call the \`select_organization\` tool with one of these, then retry:\n${orgList}`
             )
         }
@@ -686,14 +707,11 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     return { content: [{ type: 'text' as const, text: NON_CLERK_MSG }], isError: true }
                 }
                 try {
-                    const memberships = await clerkClient.users.getOrganizationMembershipList({
-                        userId: auth.clerkUserId,
-                    })
                     // Report the EFFECTIVE org, mirroring resolveClerkConsoleJwt's
                     // precedence (token-pinned > single-org auto-pick > stored choice) —
                     // previously only the stored choice was reported, so pinned and
                     // single-org sessions showed nothing selected.
-                    const membershipData = memberships.data ?? []
+                    const membershipData = await listUserOrgMemberships(auth.clerkUserId)
                     const stored =
                         auth.clerkOrgId || membershipData.length === 1
                             ? undefined
@@ -754,17 +772,15 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     return { content: [{ type: 'text' as const, text: NON_CLERK_MSG }], isError: true }
                 }
                 try {
-                    const memberships = await clerkClient.users.getOrganizationMembershipList({
-                        userId: auth.clerkUserId,
-                    })
+                    const memberships = await listUserOrgMemberships(auth.clerkUserId)
                     const query = organization.trim().toLowerCase()
-                    const match = (memberships.data ?? []).find(
+                    const match = memberships.find(
                         (m) =>
                             m.organization.id.toLowerCase() === query ||
                             m.organization.name.toLowerCase() === query
                     )
                     if (!match) {
-                        const orgList = (memberships.data ?? [])
+                        const orgList = memberships
                             .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                             .join('\n')
                         return {
@@ -1777,16 +1793,12 @@ if (CLERK_ENABLED) {
     // into the token's `org_id` claim (resolveClerkConsoleJwt path 1). It was
     // advertised 2026-05-08 → 2026-06-18 and pulled because Clerk did not grant
     // it to DCR clients (Cursor, Codex, ...), which broke their OAuth
-    // onboarding. Clerk closed that gap (verified end-to-end on dev,
-    // 2026-09-21: a DCR client registered with the scope gets the picker and
-    // an `org_id`). Two conditions remain, both outside this repo:
-    //   - Clerk's instance defaults for dynamic clients must include it, for
-    //     clients that omit `scope` at registration (ChatGPT) —
-    //     `pnpm check:oauth-config` verifies this.
-    //   - Clients registered BEFORE the scope was allowed still fail with
-    //     invalid_scope when they request it, so this list must not ship
-    //     until Clerk has backfilled the existing dynamic clients. See
-    //     docs/operations.md.
+    // onboarding. Clerk closed that gap; the scope was re-advertised on
+    // 2026-09-24, and Clerk backfilled it onto every existing dynamic client on
+    // 2026-09-26. It also depends on Clerk's instance defaults for dynamic
+    // clients including it, for clients that omit `scope` at registration
+    // (ChatGPT) — `pnpm check:oauth-config` verifies this. Adding any other
+    // scope here needs the same backfill; see docs/operations.md.
     //
     // `select_organization` (path 3/4) stays as the fallback for tokens that
     // carry no `org_id`.
