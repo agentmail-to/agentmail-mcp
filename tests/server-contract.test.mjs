@@ -37,6 +37,10 @@ const coreTools = [
   // takes an OTP code and returns { verified }, so the identifier concern that
   // keeps auth_me out does not apply.
   'agent_verify',
+  // agent_attach_human (agentmail-toolkit 0.9.0) is the step before agent_verify
+  // for an agent that signed up without a human_email: until a human is
+  // attached its inbox can receive but not send, and there is no code to verify.
+  'agent_attach_human',
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
