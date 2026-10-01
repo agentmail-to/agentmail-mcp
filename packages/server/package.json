@@ -11,7 +11,7 @@
     "@clerk/express": "2.1.40",
     "@clerk/mcp-tools": "0.3.1",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "agentmail": "0.5.31",
+    "agentmail": "0.5.34",
     "agentmail-toolkit": "0.10.0",
     "cors": "2.8.5",
     "express": "5.2.1",
