@@ -45,13 +45,15 @@ const coreTools = [
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
   //
-  // Provider marketplace, catalog additions, and the inbox allow/block lists
-  // come from agentmail-toolkit 0.8.0.
-  'list_providers',
-  'search_providers',
-  'get_provider',
+  // The app marketplace, catalog additions, and the inbox allow/block lists
+  // come from agentmail-toolkit 0.8.0; 0.10.0 renamed the provider tools
+  // (list_providers, search_providers, get_provider, connect_provider) to
+  // the app tools outright, with no aliases.
+  'list_apps',
+  'search_apps',
+  'get_app',
   'list_accounts',
-  'connect_provider',
+  'connect_app',
   'get_message',
   'search_inboxes',
   'list_list_entries',
