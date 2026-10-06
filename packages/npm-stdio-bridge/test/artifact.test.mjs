@@ -9,7 +9,7 @@ import test from 'node:test'
 test('published artifact is an executable bridge without AgentMail implementation dependencies', async (t) => {
     const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     assert.equal(packageJson.version, '1.1.0')
-    assert.deepEqual(packageJson.dependencies, { '@modelcontextprotocol/sdk': '1.29.0' })
+    assert.deepEqual(packageJson.dependencies, { '@modelcontextprotocol/sdk': '1.32.1' })
 
     const built = await readFile(new URL('../build/index.js', import.meta.url), 'utf8')
     assert.match(built, /^#!\/usr\/bin\/env node/)
