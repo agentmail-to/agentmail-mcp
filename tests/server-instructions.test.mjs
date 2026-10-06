@@ -34,6 +34,7 @@ test('every tool the instructions name is in the catalog', async (t) => {
   const catalog = new Set(tools.map((tool) => tool.name))
   const named = new Set(SERVER_INSTRUCTIONS.match(/\b[a-z]+(?:_[a-z]+)+\b/g))
   assert.ok(named.has('connect_app'))
+  assert.ok(named.has('authorize_inbox'))
   for (const name of named) assert.ok(catalog.has(name), `instructions name unknown tool ${name}`)
 })
 
