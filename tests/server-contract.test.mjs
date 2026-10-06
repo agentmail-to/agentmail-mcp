@@ -54,6 +54,10 @@ const coreTools = [
   'get_app',
   'list_accounts',
   'connect_app',
+  // authorize_inbox (agentmail-toolkit 0.12.0) finishes a sign-in the app's
+  // own Sign in with AgentID page started, so it reaches apps that are not
+  // registered with AgentID, where connect_app 404s.
+  'authorize_inbox',
   'get_message',
   'search_inboxes',
   'list_list_entries',
