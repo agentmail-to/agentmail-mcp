@@ -38,6 +38,7 @@ import crypto from 'node:crypto'
 import v8 from 'node:v8'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import fs from 'node:fs'
+import type http from 'node:http'
 import { z } from 'zod'
 
 // ============================================================================
@@ -1685,6 +1686,8 @@ function admissionSlotOf(res: express.Response): AdmissionSlot | undefined {
 let inFlight = 0
 let shedTotal = 0
 let pingsFastPathed = 0
+let skippedAfterTimeout = 0
+let batchesRejected = 0
 // Log the transition, not the event: at overload the shed rate is exactly the
 // excess arrival rate, so per-request logging would itself become a load source.
 let shedding = false
@@ -1699,7 +1702,23 @@ function overloadReason(): string | undefined {
     return undefined
 }
 
+// Set by beginDrain. New MCP requests are shed with Retry-After so the client
+// moves to the replacement process; the ones already in flight finish.
+let draining = false
+
 export const admissionControl: express.RequestHandler = (req, res, next) => {
+    if (draining) {
+        shedTotal++
+        res.status(503)
+            .set('Retry-After', String(SHED_RETRY_AFTER_SECONDS))
+            .set('Connection', 'close')
+            .json({
+                jsonrpc: '2.0',
+                error: { code: -32000, message: 'Server is restarting, retry shortly' },
+                id: null,
+            })
+        return
+    }
     const reason = overloadReason()
     if (reason) {
         shedTotal++
@@ -1778,6 +1797,12 @@ export const requestTimeout: express.RequestHandler = (req, res, next) => {
     const timer = setTimeout(() => {
         if (!res.headersSent) {
             console.warn(`[timeout] request exceeded ${REQUEST_TIMEOUT_MS} ms, returning 504`)
+            // The 504 answers the client, but the middleware chain is still
+            // suspended somewhere upstream of the handler (body parse of a slow
+            // upload, a Clerk round trip). When it resumes it would build an MCP
+            // server and run the tool against a response nobody is reading:
+            // a send_message the client already saw fail, and will retry.
+            res.locals.timedOut = true
             res.status(504).json({
                 jsonrpc: '2.0',
                 error: { code: -32000, message: 'Request timed out' },
@@ -1811,11 +1836,21 @@ export const requestTimeout: express.RequestHandler = (req, res, next) => {
 // the resolved auth source. Only POST reaches this handler: text/html GETs
 // are redirected to the docs above, all other GETs and DELETEs get a 405
 // from statelessMethodGuard.
-const mcpHandler: express.RequestHandler = async (req, res) => {
+export const mcpHandler: express.RequestHandler = async (req, res) => {
     // Take the slot off the connection lifecycle: from here the request is only
     // done when this handler settles, not when the client stops listening.
     const slot = admissionSlotOf(res)
     if (slot) slot.ownedByHandler = true
+    // A request that was already answered (504 from requestTimeout, or a client
+    // that hung up during body parse or Clerk) must not execute its tool now.
+    // The response is gone, so nothing would observe a success, but a write
+    // tool would still send the email. res.on('close') below would also never
+    // fire for an already-closed response, leaving the transport un-torn-down.
+    if (res.locals.timedOut === true || res.writableEnded || res.destroyed) {
+        skippedAfterTimeout++
+        slot?.release()
+        return
+    }
     try {
         const authSource = req.authSource ?? { kind: 'none' }
         const server = createMcpServer(authSource)
@@ -1874,6 +1909,23 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // response is a constant. The one observable change: an unauthenticated ping
 // now gets 200 instead of the 401 challenge; real requests still 401.
 // ============================================================================
+
+// JSON-RPC batching was removed from the MCP spec in 2025-06-18, and every
+// client seen on this server negotiates 2025-11-25. The SDK transport still
+// accepts an array of up to 100 messages and dispatches each one, so a single
+// admitted request could carry 100 tool calls through one admission slot and
+// one Clerk verification. Reject arrays outright rather than counting them:
+// no legitimate client sends them, and the rejection is a plain JSON-RPC error
+// a client can understand.
+export const rejectBatch: express.RequestHandler = (req, res, next) => {
+    if (!Array.isArray(req.body)) return next()
+    batchesRejected++
+    res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: 'JSON-RPC batch requests are not supported' },
+        id: null,
+    })
+}
 
 const pingFastPath: express.RequestHandler = (req, res, next) => {
     const body = req.body as unknown
@@ -1957,6 +2009,7 @@ const mcpPipeline = [
     admissionControl,
     requestTimeout,
     parseJsonBody,
+    rejectBatch,
     pingFastPath,
     clerkAuthBoundary,
     authRouter,
@@ -1997,8 +2050,10 @@ if (CLERK_ENABLED) {
 
 app.get('/health', (_req, res) => {
     const { heapUsed, rss } = process.memoryUsage()
-    res.json({
-        status: 'ok',
+    // 503 while draining so a platform health check stops routing to this
+    // process before the listener closes; the body still carries the numbers.
+    res.status(draining ? 503 : 200).json({
+        status: draining ? 'draining' : 'ok',
         clerk_enabled: CLERK_ENABLED,
         agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
         mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
@@ -2020,6 +2075,8 @@ app.get('/health', (_req, res) => {
             event_loop_lag_ms: Math.round(recentLagMs),
             max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
             pings_fast_path: pingsFastPathed,
+            skipped_after_timeout: skippedAfterTimeout,
+            batches_rejected: batchesRejected,
             clerk: clerkStats(),
         },
         // Where the queue is. Low in_flight + low lag + climbing latency means
@@ -2198,4 +2255,75 @@ export function startListening(port: number = PORT) {
     return server
 }
 
-if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') startListening()
+// Graceful shutdown. Without this a SIGTERM (every deploy, every scale-down)
+// killed the process mid-request: in-flight tool calls died after their
+// upstream side effect, and every open keep-alive connection was reset at
+// once, which the clients answered with a synchronized reconnect storm at
+// the replacement process. Stop accepting, finish what is in flight within a
+// bounded window, then exit.
+const DRAIN_TIMEOUT_MS = Math.max(
+    500,
+    parseInt(process.env.AGENTMAIL_DRAIN_TIMEOUT_MS || '', 10) || 8_000
+)
+
+type DrainOptions = {
+    reason?: string
+    timeoutMs?: number
+    exit?: (code: number) => void
+}
+
+let drainPromise: Promise<void> | undefined
+
+/**
+ * Begin draining `server`: stop accepting, close idle keep-alive connections,
+ * shed new MCP requests, wait for in-flight requests (bounded by timeoutMs),
+ * then call `exit`. Idempotent: a second signal returns the same promise.
+ */
+export function beginDrain(server: http.Server, options: DrainOptions = {}): Promise<void> {
+    if (drainPromise) return drainPromise
+    const { reason = 'signal', timeoutMs = DRAIN_TIMEOUT_MS, exit = (code) => process.exit(code) } = options
+    draining = true
+    console.warn(`[drain] ${reason}: stopping accept, ${inFlight} in flight, waiting up to ${timeoutMs} ms`)
+
+    drainPromise = new Promise<void>((resolve) => {
+        let settled = false
+        const finish = (how: string) => {
+            if (settled) return
+            settled = true
+            clearInterval(poll)
+            clearTimeout(deadline)
+            console.warn(`[drain] ${how}: ${inFlight} in flight, exiting`)
+            // Anything still streaming past the deadline is torn down here so
+            // the platform does not have to kill us for it.
+            server.closeAllConnections()
+            resolve()
+            exit(0)
+        }
+        // close() stops accepting and, since Node 19, closes idle keep-alive
+        // connections; its callback waits for every connection, including ones
+        // mid-request, so the in-flight counter is the thing to watch.
+        server.close()
+        server.closeIdleConnections()
+        const poll = setInterval(() => {
+            if (inFlight <= 0) finish('drained')
+        }, 50)
+        poll.unref()
+        const deadline = setTimeout(() => finish(`deadline ${timeoutMs} ms reached`), timeoutMs)
+        deadline.unref()
+        if (inFlight <= 0) finish('drained')
+    })
+    return drainPromise
+}
+
+let signalsInstalled = false
+function installDrainSignals(server: http.Server) {
+    if (signalsInstalled) return
+    signalsInstalled = true
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+        process.once(signal, () => {
+            void beginDrain(server, { reason: signal })
+        })
+    }
+}
+
+if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') installDrainSignals(startListening())
