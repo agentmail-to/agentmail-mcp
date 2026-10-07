@@ -64,23 +64,15 @@ test('a ping-shaped notification (no id) falls through to the SDK', async (t) =>
 
 test('non-ping requests still take the full path', async (t) => {
     await withServer(t, async (port) => {
+        // tools/call is on neither the ping nor the protocol fast path.
         const res = await post(
             port,
-            {
-                jsonrpc: '2.0',
-                id: 1,
-                method: 'initialize',
-                params: {
-                    protocolVersion: '2025-06-18',
-                    capabilities: {},
-                    clientInfo: { name: 'test', version: '1' },
-                },
-            },
+            { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_inboxes', arguments: {} } },
             { 'x-api-key': 'am_dummy' }
         )
         assert.equal(res.status, 200)
-        // The full path answers via the SDK transport (SSE), proving initialize
-        // did not get intercepted by the ping shortcut.
+        // The full path answers via the SDK transport (SSE), proving the call
+        // did not get intercepted by either shortcut.
         assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/)
     })
 })

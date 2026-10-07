@@ -33,6 +33,9 @@ import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
 import v8 from 'node:v8'
@@ -1680,6 +1683,7 @@ let shedTotal = 0
 let pingsFastPathed = 0
 let skippedAfterTimeout = 0
 let batchesRejected = 0
+const protocolFastPathed = { initialize: 0, initialized: 0, tools_list: 0 }
 // Log the transition, not the event: at overload the shed rate is exactly the
 // excess arrival rate, so per-request logging would itself become a load source.
 let shedding = false
@@ -1902,6 +1906,149 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // now gets 200 instead of the 401 challenge; real requests still 401.
 // ============================================================================
 
+// ============================================================================
+// Protocol fast path: initialize, notifications/initialized, tools/list
+//
+// Excluding ping, 93% of production requests are these three (35% / 29% /
+// 29% over 30 days), and every one of them has a constant answer: this server
+// registers the same tools for every request, so initialize's capabilities
+// and tools/list's catalog never vary, and the only per-request content is
+// the request id and the negotiated protocol version. Yet each one built a
+// McpServer with every tool (zod → JSON schema for ~40 tools) and an SSE
+// transport. Measured: tools/list 2.3 ms CPU vs 0.25 ms for a ping on the
+// same path; initialize 0.8 ms.
+//
+// The answers are taken from the real server exactly once, through the SDK's
+// own client over an in-memory transport, so what is cached is what the full
+// path would have produced, including the SDK's schema conversion. They are
+// serialized once; each request only splices in its id.
+//
+// Fidelity rules, so the cached answer is never given where the SDK would
+// have refused: the body must already be the exact shape the SDK's strict
+// schemas accept (any extra key, a missing clientInfo.version, an unsupported
+// mcp-protocol-version header) or the request falls through to the full path
+// and gets the SDK's own error. Authentication is unchanged: this runs after
+// authRouter, so an unauthenticated initialize still gets its 401 challenge.
+// Streamable HTTP permits a plain application/json response to any POST.
+// ============================================================================
+
+const PROTOCOL_FAST_PATH_ENABLED = process.env.AGENTMAIL_PROTOCOL_FAST_PATH !== '0'
+
+type ProtocolSnapshot = {
+    /** Serialized initialize result, keyed by negotiated protocol version. */
+    initializeJson: Map<string, string>
+    /** Serialized tools/list result. */
+    toolsListJson: string
+    toolCount: number
+}
+
+let protocolSnapshot: Promise<ProtocolSnapshot> | undefined
+
+/**
+ * Capture the server's constant protocol answers through the SDK client, once.
+ * Exported for tests. A failure clears the memo so the next request retries
+ * instead of pinning every request to the slow path forever.
+ */
+export function loadProtocolSnapshot(): Promise<ProtocolSnapshot> {
+    if (protocolSnapshot) return protocolSnapshot
+    protocolSnapshot = (async () => {
+        const server = createMcpServer({ kind: 'none' })
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+        const client = new McpClient({ name: 'agentmail-mcp-snapshot', version: '1.0.0' })
+        try {
+            await server.connect(serverTransport)
+            await client.connect(clientTransport)
+            const { tools } = await client.listTools()
+            const capabilities = client.getServerCapabilities()
+            const serverInfo = client.getServerVersion()
+            const instructions = client.getInstructions()
+            const initializeJson = new Map<string, string>()
+            for (const protocolVersion of SUPPORTED_PROTOCOL_VERSIONS) {
+                initializeJson.set(
+                    protocolVersion,
+                    JSON.stringify({
+                        protocolVersion,
+                        capabilities,
+                        serverInfo,
+                        ...(instructions && { instructions }),
+                    })
+                )
+            }
+            return { initializeJson, toolsListJson: JSON.stringify({ tools }), toolCount: tools.length }
+        } finally {
+            await client.close().catch(() => {})
+            await server.close().catch(() => {})
+        }
+    })()
+    protocolSnapshot.catch(() => {
+        protocolSnapshot = undefined
+    })
+    return protocolSnapshot
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+    return Object.keys(value).every((key) => allowed.includes(key))
+}
+
+function sendJsonRpcResult(res: express.Response, id: string | number, resultJson: string) {
+    res.status(200)
+        .set('Content-Type', 'application/json')
+        .send(`{"jsonrpc":"2.0","id":${JSON.stringify(id)},"result":${resultJson}}`)
+}
+
+export const protocolFastPath: express.RequestHandler = async (req, res, next) => {
+    if (!PROTOCOL_FAST_PATH_ENABLED) return next()
+    const body = req.body as unknown
+    if (!isPlainObject(body) || body.jsonrpc !== '2.0') return next()
+    const accept = String(req.headers.accept ?? '')
+    if (!accept.includes('application/json') && !accept.includes('*/*')) return next()
+    const versionHeader = req.headers['mcp-protocol-version']
+    if (versionHeader !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(String(versionHeader))) return next()
+
+    const { method, id, params } = body
+    const hasId = typeof id === 'string' || typeof id === 'number'
+
+    try {
+        if (method === 'notifications/initialized') {
+            if ('id' in body || !hasOnlyKeys(body, ['jsonrpc', 'method', 'params'])) return next()
+            if (params !== undefined && !isPlainObject(params)) return next()
+            protocolFastPathed.initialized++
+            res.status(202).end()
+            return
+        }
+        if (!hasId || !hasOnlyKeys(body, ['jsonrpc', 'id', 'method', 'params'])) return next()
+        if (method === 'initialize') {
+            if (!isPlainObject(params) || typeof params.protocolVersion !== 'string') return next()
+            if (!isPlainObject(params.capabilities) || !isPlainObject(params.clientInfo)) return next()
+            const { name, version } = params.clientInfo
+            if (typeof name !== 'string' || typeof version !== 'string') return next()
+            const snapshot = await loadProtocolSnapshot()
+            const negotiated = SUPPORTED_PROTOCOL_VERSIONS.includes(params.protocolVersion)
+                ? params.protocolVersion
+                : LATEST_PROTOCOL_VERSION
+            const resultJson = snapshot.initializeJson.get(negotiated)
+            if (!resultJson) return next()
+            protocolFastPathed.initialize++
+            sendJsonRpcResult(res, id, resultJson)
+            return
+        }
+        if (method === 'tools/list') {
+            if (params !== undefined && !isPlainObject(params)) return next()
+            const snapshot = await loadProtocolSnapshot()
+            protocolFastPathed.tools_list++
+            sendJsonRpcResult(res, id, snapshot.toolsListJson)
+            return
+        }
+    } catch (error) {
+        console.error('[fast-path] snapshot unavailable, using full path:', error)
+    }
+    next()
+}
+
 // JSON-RPC batching was removed from the MCP spec in 2025-06-18, and every
 // client seen on this server negotiates 2025-11-25. The SDK transport still
 // accepts an array of up to 100 messages and dispatches each one, so a single
@@ -2005,6 +2152,7 @@ const mcpPipeline = [
     pingFastPath,
     clerkAuthBoundary,
     authRouter,
+    protocolFastPath,
     mcpHandler,
 ]
 app.all('/mcp', ...mcpPipeline, mcpErrorBoundary)
@@ -2067,6 +2215,7 @@ app.get('/health', (_req, res) => {
             event_loop_lag_ms: Math.round(recentLagMs),
             max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
             pings_fast_path: pingsFastPathed,
+            protocol_fast_path: { ...protocolFastPathed },
             skipped_after_timeout: skippedAfterTimeout,
             batches_rejected: batchesRejected,
             clerk: clerkStats(),
