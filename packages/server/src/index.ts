@@ -280,18 +280,123 @@ function extractOrgIdFromClerkToken(token: string | undefined): string | undefin
 // it's an internal routing setting, never exposed to the frontend or the token.
 const MCP_SELECTED_ORG_KEY = 'mcpSelectedOrgId'
 
+// ============================================================================
+// Clerk containment
+//
+// Every OAuth tool call depends synchronously on Clerk's Backend API: the
+// membership lookup on every call, getUser for multi-org users, and the
+// internal-org mapping the first time an org is seen. @clerk/backend has no
+// request timeout and ignores our abort signal, so before this a stalled Clerk
+// held an admission slot for the full 30 s request timeout per OAuth call. Above
+// ~8 OAuth calls/s that fills the cap and API-key users are shed too, while the
+// event-loop trigger never fires because the process is idle-waiting. Clerk's
+// production rate limit (1000 req/10 s per instance, shared with the console)
+// makes a 429 storm the other way to get there.
+//
+// Three bounds, each cheap: a timeout the caller stops waiting at, a cap on
+// Clerk calls in flight that sheds instantly instead of queueing, and a short
+// membership cache so the common path makes no Clerk call at all. The access
+// token already attests the user for 24 h; a five-minute membership lag is
+// strictly tighter than that. Failures and empty lists are never cached.
+// ============================================================================
+
+const CLERK_CALL_TIMEOUT_MS = Math.max(500, parseInt(process.env.AGENTMAIL_CLERK_TIMEOUT_MS || '', 10) || 5_000)
+const MAX_CLERK_IN_FLIGHT = Math.max(1, parseInt(process.env.AGENTMAIL_MAX_CLERK_IN_FLIGHT || '', 10) || 64)
+const MEMBERSHIP_CACHE_TTL_MS = Math.max(
+    0,
+    parseInt(process.env.AGENTMAIL_MEMBERSHIP_CACHE_TTL_MS || '', 10) || 5 * 60_000
+)
+// Caches are process-local and bounded by wholesale eviction: they hold one
+// small entry per recently active user/org, so a cap this size is never hit
+// in practice, and clearing is cheaper and safer than LRU bookkeeping.
+const CLERK_CACHE_MAX_ENTRIES = 10_000
+
+let clerkInFlight = 0
+let clerkTimeoutsTotal = 0
+let clerkShedTotal = 0
+
+export class ClerkUnavailableError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'ClerkUnavailableError'
+    }
+}
+
+export function clerkStats() {
+    return {
+        in_flight: clerkInFlight,
+        max_in_flight: MAX_CLERK_IN_FLIGHT,
+        timeout_ms: CLERK_CALL_TIMEOUT_MS,
+        timeouts_total: clerkTimeoutsTotal,
+        shed_total: clerkShedTotal,
+        membership_cache_size: membershipCache.size,
+    }
+}
+
+/**
+ * Run one Clerk Backend API call under the timeout and the in-flight cap.
+ *
+ * The in-flight count is released when the UNDERLYING call settles, not when
+ * the caller stops waiting: a call that timed out is still open at Clerk and
+ * still consuming its rate limit, and releasing it early would let callers
+ * stack unbounded requests behind a cap that reads empty — the shape of the
+ * stall this exists to bound.
+ */
+export async function boundedClerkCall<T>(
+    label: string,
+    run: () => Promise<T>,
+    { timeoutMs = CLERK_CALL_TIMEOUT_MS, maxInFlight = MAX_CLERK_IN_FLIGHT } = {}
+): Promise<T> {
+    if (clerkInFlight >= maxInFlight) {
+        clerkShedTotal++
+        throw new ClerkUnavailableError(
+            `Authentication service is busy (${clerkInFlight} Clerk calls in flight). Retry shortly.`
+        )
+    }
+    clerkInFlight++
+    const underlying = run()
+    underlying.then(
+        () => clerkInFlight--,
+        () => clerkInFlight--
+    )
+    let timer: NodeJS.Timeout | undefined
+    try {
+        return await Promise.race([
+            underlying,
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    clerkTimeoutsTotal++
+                    reject(
+                        new ClerkUnavailableError(
+                            `Authentication service ${label} did not answer within ${timeoutMs} ms. Retry shortly.`
+                        )
+                    )
+                }, timeoutMs)
+                timer.unref()
+            }),
+        ])
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
 /** Read the user's previously-selected org id from Clerk privateMetadata. */
 async function getStoredMcpOrgId(clerkUserId: string): Promise<string | undefined> {
-    const user = await clerkClient.users.getUser(clerkUserId)
+    // Deliberately uncached: this is the one value `select_organization` on
+    // ANOTHER machine can change, and a stale read would route a destructive
+    // op (delete_inbox) at the org the user just switched away from.
+    const user = await boundedClerkCall('getUser', () => clerkClient.users.getUser(clerkUserId))
     const stored = (user.privateMetadata as Record<string, unknown>)?.[MCP_SELECTED_ORG_KEY]
     return typeof stored === 'string' && stored ? stored : undefined
 }
 
 /** Persist the user's org selection to Clerk privateMetadata. */
 async function setStoredMcpOrgId(clerkUserId: string, orgId: string): Promise<void> {
-    await clerkClient.users.updateUserMetadata(clerkUserId, {
-        privateMetadata: { [MCP_SELECTED_ORG_KEY]: orgId },
-    })
+    await boundedClerkCall('updateUserMetadata', () =>
+        clerkClient.users.updateUserMetadata(clerkUserId, {
+            privateMetadata: { [MCP_SELECTED_ORG_KEY]: orgId },
+        })
+    )
 }
 
 // Clerk's list endpoints return 10 rows unless asked for more; 500 is the
@@ -305,19 +410,50 @@ export const ORG_MEMBERSHIP_PAGE_SIZE = 500
 type OrganizationMembershipPage = Awaited<
     ReturnType<typeof clerkClient.users.getOrganizationMembershipList>
 >
+type OrganizationMemberships = OrganizationMembershipPage['data']
 
-/** Every organization membership of a Clerk user. */
+type MembershipLookupDependencies = {
+    listMemberships: (params: { userId: string; limit: number }) => Promise<Pick<OrganizationMembershipPage, 'data'>>
+    now: () => number
+    cache: Map<string, { value: OrganizationMemberships; expiresAt: number }>
+    ttlMs: number
+}
+
+const membershipCache: MembershipLookupDependencies['cache'] = new Map()
+
+const defaultMembershipLookup: MembershipLookupDependencies = {
+    listMemberships: (params) =>
+        boundedClerkCall('membership lookup', () => clerkClient.users.getOrganizationMembershipList(params)),
+    now: Date.now,
+    cache: membershipCache,
+    ttlMs: MEMBERSHIP_CACHE_TTL_MS,
+}
+
+/** Every organization membership of a Clerk user, cached for the TTL. */
 export async function listUserOrgMemberships(
     clerkUserId: string,
-    listMemberships: (params: {
-        userId: string
-        limit: number
-    }) => Promise<Pick<OrganizationMembershipPage, 'data'>> = (params) =>
-        clerkClient.users.getOrganizationMembershipList(params)
-): Promise<OrganizationMembershipPage['data']> {
+    deps: Partial<MembershipLookupDependencies> = {}
+): Promise<OrganizationMemberships> {
+    const { listMemberships, now, cache, ttlMs } = { ...defaultMembershipLookup, ...deps }
+    const cached = cache.get(clerkUserId)
+    if (cached && cached.expiresAt > now()) return cached.value
+
     const page = await listMemberships({ userId: clerkUserId, limit: ORG_MEMBERSHIP_PAGE_SIZE })
-    return page.data ?? []
+    const memberships = page.data ?? []
+    // An empty list is the "no organization yet" state, which the Clerk
+    // webhook may change any second; pinning it would turn a one-request race
+    // into a five-minute outage for that user.
+    if (memberships.length > 0 && ttlMs > 0) {
+        if (cache.size >= CLERK_CACHE_MAX_ENTRIES) cache.clear()
+        cache.set(clerkUserId, { value: memberships, expiresAt: now() + ttlMs })
+    }
+    return memberships
 }
+
+// Clerk org id → AgentMail internal org id. The mapping is immutable once the
+// organization webhook has written it, so a hit never goes stale; it only
+// saves the bootstrap round trip for orgs whose Clerk publicMetadata lacks it.
+const internalOrgIdCache = new Map<string, string>()
 
 /**
  * Resolve the console JWT for a Clerk OAuth user's selected org — the bearer
@@ -390,9 +526,11 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
     }
 
     const meta = chosenOrg.publicMetadata as Record<string, unknown>
-    let internalOrgId = meta?.internalOrgId as string | undefined
+    let internalOrgId = (meta?.internalOrgId as string | undefined) ?? internalOrgIdCache.get(chosenOrg.id)
     if (!internalOrgId) {
         internalOrgId = await getInternalOrganizationId(chosenOrg.id)
+        if (internalOrgIdCache.size >= CLERK_CACHE_MAX_ENTRIES) internalOrgIdCache.clear()
+        internalOrgIdCache.set(chosenOrg.id, internalOrgId)
     }
 
     return signConsoleJwt(internalOrgId)
@@ -902,6 +1040,28 @@ function sendOAuthChallenge(req: express.Request, res: express.Response) {
         .json({ error: 'Unauthorized' })
 }
 
+/**
+ * Whether the request's Bearer token was accepted by clerkMiddleware as an
+ * OAuth access token. Reads the auth object the middleware installed; a
+ * request without one (middleware skipped, or a shape we don't expect) is
+ * simply not authenticated — never a crash in the auth path.
+ */
+export function clerkOAuthPreflight(req: unknown): boolean {
+    try {
+        // What @clerk/express's getAuth does, minus its brand check on req.auth
+        // (a private Symbol): read the auth object clerkMiddleware installed as
+        // a function on the request, asking for the OAuth token type.
+        const authFn = (req as { auth?: unknown }).auth
+        if (typeof authFn !== 'function') return false
+        const auth = (authFn as (options: { acceptsToken: 'oauth_token' }) => { isAuthenticated?: boolean; tokenType?: string })(
+            { acceptsToken: 'oauth_token' }
+        )
+        return auth?.isAuthenticated === true && auth.tokenType === 'oauth_token'
+    } catch {
+        return false
+    }
+}
+
 const authRouter: express.RequestHandler = async (req, res, next) => {
     const apiKey = extractApiKey(req)
     if (apiKey) {
@@ -928,6 +1088,19 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
             // Don't log the header value: a token joined by non-space
             // whitespace would land here and must not reach the logs.
             console.warn('[auth] malformed Authorization header (no token after scheme), returning 401')
+            return sendOAuthChallenge(req, res)
+        }
+
+        // An expired or otherwise rejected token reaches mcpAuthClerk as an
+        // unauthenticated auth object (clerkMiddleware does not throw for it),
+        // and mcpAuthClerk answers that with a bare 401 and NO WWW-Authenticate
+        // (`if (!authData) return res.status(401).json(...)`, unchanged
+        // upstream through 0.6.0). Clients that key discovery off the header
+        // then cannot restart OAuth. Decide it here instead, with the challenge.
+        // Clerk access tokens live 24 h, so every long-lived connection hits
+        // this path once a day.
+        if (authHeader && !clerkOAuthPreflight(req)) {
+            console.warn('[auth] OAuth token not accepted (expired or invalid), returning 401 challenge')
             return sendOAuthChallenge(req, res)
         }
 
@@ -1847,6 +2020,7 @@ app.get('/health', (_req, res) => {
             event_loop_lag_ms: Math.round(recentLagMs),
             max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
             pings_fast_path: pingsFastPathed,
+            clerk: clerkStats(),
         },
         // Where the queue is. Low in_flight + low lag + climbing latency means
         // the wait is upstream of the first middleware. If open_fds is near
