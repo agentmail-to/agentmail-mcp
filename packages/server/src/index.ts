@@ -791,23 +791,15 @@ export function createMcpServer(auth: AuthSource): McpServer {
                     return noAuthMessage
                 }
 
-                // Re-bind the tool's callback to our per-call client. The
-                // toolkit's tools were created with the placeholder client;
-                // we need to call them with the real one. We do this by
-                // creating a fresh toolkit + tool for this call.
                 if (tool.name === 'get_thread') {
                     return runGetThread(tool, client, args, extra?.signal)
                 }
 
-                const realToolkit = new AgentMailToolkit(client)
-                const realTool = realToolkit.getTools().find((t) => t.name === tool.name)
-                if (!realTool) {
-                    return {
-                        content: [{ type: 'text' as const, text: `Tool ${tool.name} not found in toolkit` }],
-                        isError: true,
-                    }
-                }
-                return realTool.callback(args, extra)
+                // The toolkit's own callbacks are bound to the placeholder
+                // client it was built with, so hand the per-call client to
+                // invoke(), which the toolkit added for this multi-tenant
+                // case, instead of building a fresh toolkit per call.
+                return staticToolkit.invoke(tool.name, client, args)
             } catch (error) {
                 return toolFailure(tool.name, error)
             }
