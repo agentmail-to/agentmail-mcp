@@ -35,6 +35,10 @@ test('health identifies the build and human MCP navigation redirects before auth
   assert.ok(requests.max_in_flight > 0)
   assert.ok(requests.max_event_loop_lag_ms > 0)
   assert.equal(typeof requests.shed_total, 'number')
+  // Declared body bytes are budgeted alongside the request count; both halves
+  // of the budget are reported so an operator can see how close a burst came.
+  assert.equal(requests.in_flight_bytes, 0)
+  assert.ok(requests.max_in_flight_bytes >= 10 * 1024 * 1024)
 
   // Socket telemetry is present even when the process is not listening (tests
   // import the app without listening), so counters read zero. open_fds and

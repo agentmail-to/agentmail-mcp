@@ -10,6 +10,10 @@ process.env.AGENTMAIL_MAX_IN_FLIGHT = '2'
 // test can run.
 process.env.AGENTMAIL_REQUEST_TIMEOUT_MS = '1000'
 process.env.AGENTMAIL_MAX_EVENT_LOOP_LAG_MS = '300'
+// The budget is floored at one max-size request (10 MiB) so a lone large send
+// is never shed by configuration; set it to exactly that floor so two 6 MB
+// declarations exceed it while the in-flight count (cap 2) does not.
+process.env.AGENTMAIL_MAX_IN_FLIGHT_BYTES = String(10 * 1024 * 1024)
 const { app, admissionControl, requestTimeout } = await import('../packages/server/build/index.js')
 
 /** Minimal stand-in for an Express response: records what the middleware did. */
@@ -37,10 +41,10 @@ function mockRes() {
     return res
 }
 
-function admit() {
+function admit(headers = {}) {
     const res = mockRes()
     let passed = false
-    admissionControl({}, res, () => {
+    admissionControl({ headers }, res, () => {
         passed = true
     })
     return { res, passed }
@@ -103,6 +107,33 @@ test('a double close does not release the same slot twice', () => {
     third.res.emit('close')
 })
 
+test('declared request bodies are budgeted, not just counted', () => {
+    // Two requests are under the in-flight cap of 2, but their declared bodies
+    // (6 MB + 6 MB) exceed the 10 MiB budget. The budget is what stops a burst
+    // of near-10 MB attachment sends from being parsed into the heap at once —
+    // the per-request limit alone caps each body, not their sum.
+    const first = admit({ 'content-length': '6000000' })
+    assert.equal(first.passed, true)
+
+    const second = admit({ 'content-length': '6000000' })
+    assert.equal(second.passed, false, 'over budget is shed even though the count cap has room')
+    assert.equal(second.res.statusCode, 503)
+    assert.ok(Number(second.res.headers['Retry-After']) >= 1)
+    assert.match(second.res.body.error.message, /overloaded/i)
+
+    // A request that declares no length costs nothing against the budget: the
+    // per-request parser limit still bounds it, and most clients do send one.
+    const undeclared = admit({})
+    assert.equal(undeclared.passed, true)
+
+    first.res.emit('close')
+    const afterRelease = admit({ 'content-length': '6000000' })
+    assert.equal(afterRelease.passed, true, 'bytes are returned with the slot')
+
+    undeclared.res.emit('close')
+    afterRelease.res.emit('close')
+})
+
 test('a request that never responds is timed out so its slot comes back', async () => {
     const res = mockRes()
     // next() is intentionally a no-op: this models the contained-unhandled-
@@ -123,7 +154,10 @@ test('a saturated event loop sheds even while in-flight is zero', async (t) => {
     await new Promise((resolve) => server.once('listening', resolve))
     const { port } = server.address()
 
-    const ping = () =>
+    // Not a ping: pings are answered before admission control precisely so
+    // that shedding never applies to them. tools/list goes through the full
+    // admission path and needs no upstream call.
+    const probe = () =>
         fetch(`http://127.0.0.1:${port}/mcp`, {
             method: 'POST',
             headers: {
@@ -131,10 +165,14 @@ test('a saturated event loop sheds even while in-flight is zero', async (t) => {
                 accept: 'application/json, text/event-stream',
                 'x-api-key': 'am_dummy',
             },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping', params: {} }),
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        }).then(async (res) => {
+            // Drain so the connection and its admission slot are released.
+            const body = await res.text()
+            return { status: res.status, retryAfter: res.headers.get('retry-after'), body }
         })
 
-    assert.equal((await ping()).status, 200, 'healthy server admits')
+    assert.equal((await probe()).status, 200, 'healthy server admits')
 
     // Reproduce sustained saturation, which is what the outage actually was:
     // back-to-back CPU chunks with only a bare yield between them, so the loop is
@@ -153,11 +191,10 @@ test('a saturated event loop sheds even while in-flight is zero', async (t) => {
         await new Promise((resolve) => setImmediate(resolve))
     }
 
-    const shedRes = await ping()
+    const shedRes = await probe()
     assert.equal(shedRes.status, 503)
-    assert.ok(Number(shedRes.headers.get('retry-after')) >= 1)
-    const shedBody = await shedRes.json()
-    assert.equal(shedBody.error.code, -32000)
+    assert.ok(Number(shedRes.retryAfter) >= 1)
+    assert.equal(JSON.parse(shedRes.body).error.code, -32000)
 
     const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json()
     assert.ok(health.requests.event_loop_lag_ms > health.requests.max_event_loop_lag_ms)
@@ -167,7 +204,7 @@ test('a saturated event loop sheds even while in-flight is zero', async (t) => {
     // without any intervention — shedding has to be self-healing, or it would
     // turn a transient spike into a permanent outage.
     await new Promise((resolve) => setTimeout(resolve, 2400))
-    assert.equal((await ping()).status, 200, 'recovers on its own')
+    assert.equal((await probe()).status, 200, 'recovers on its own')
 })
 
 test('the timeout does not fire once the response is already sent', async () => {
