@@ -91,34 +91,33 @@ test('hung calls filling the cap do not leave the server shedding permanently', 
         const stuck = [settle(callHangingTool(port)), settle(callHangingTool(port))]
 
         await new Promise((resolve) => setTimeout(resolve, 300))
-        const duringOverload = await fetch(`http://127.0.0.1:${port}/mcp`, {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                accept: 'application/json, text/event-stream',
-                'x-api-key': 'am_dummy',
-            },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'ping', params: {} }),
-        })
-        await duringOverload.text()
-        assert.equal(duringOverload.status, 503, 'cap is enforced while genuinely full')
+        const post = (method, id) =>
+            fetch(`http://127.0.0.1:${port}/mcp`, {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json',
+                    accept: 'application/json, text/event-stream',
+                    'x-api-key': 'am_dummy',
+                },
+                body: JSON.stringify({ jsonrpc: '2.0', id, method, params: {} }),
+            }).then(async (res) => {
+                await res.text()
+                return res
+            })
+
+        // A real request is shed while the cap is genuinely full...
+        assert.equal((await post('tools/list', 9)).status, 503, 'cap is enforced while genuinely full')
+        // ...but a ping is answered anyway. Shedding pings is the one 503 that
+        // makes overload worse: the client reads it as a dead server and
+        // re-initializes, three full-path requests per shed ping.
+        assert.equal((await post('ping', 11)).status, 200, 'pings bypass admission under overload')
 
         await Promise.all(stuck)
         await new Promise((resolve) => setTimeout(resolve, 200))
 
         // Without the destroy-on-timeout path these slots would never come back
         // and every later request would 503 for the life of the process.
-        const recovered = await fetch(`http://127.0.0.1:${port}/mcp`, {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                accept: 'application/json, text/event-stream',
-                'x-api-key': 'am_dummy',
-            },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'ping', params: {} }),
-        })
-        await recovered.text()
-        assert.equal(recovered.status, 200, 'server serves again once hung calls are reaped')
+        assert.equal((await post('tools/list', 10)).status, 200, 'server serves again once hung calls are reaped')
         assert.equal((await health(port)).requests.in_flight, 0)
     })
 })

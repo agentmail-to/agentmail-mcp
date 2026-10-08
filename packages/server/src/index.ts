@@ -38,6 +38,7 @@ import crypto from 'node:crypto'
 import v8 from 'node:v8'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import fs from 'node:fs'
+import type { Duplex } from 'node:stream'
 import { z } from 'zod'
 
 // ============================================================================
@@ -1248,6 +1249,7 @@ app.use(cors({ exposedHeaders: ['WWW-Authenticate'] }))
 // real send ceiling. We mirror it: express.json's 100kb default 413-rejects
 // large tool calls before they reach the MCP handler; anything above 10 MB is
 // rejected downstream by API Gateway regardless, so matching is correct.
+const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 const MAX_REQUEST_BODY = '10mb'
 const parseJsonBody = express.json({ limit: MAX_REQUEST_BODY })
 
@@ -1552,6 +1554,8 @@ const TCP_SNMP_KEYS = ['ActiveOpens', 'PassiveOpens', 'AttemptFails', 'EstabRese
 // a running histogram rather than a one-shot.
 const connectionHeaderSeen: Record<string, number> = {}
 const httpVersionSeen: Record<string, number> = {}
+const CONNECTION_HEADER_BUCKETS = new Set(['keep-alive', 'close', 'upgrade'])
+const HTTP_VERSION_BUCKETS = new Set(['1.0', '1.1', '2.0'])
 
 // The one counter that made the outage legible: ListenOverflows is the kernel
 // dropping a completed handshake because the accept backlog was full. It is
@@ -1685,22 +1689,46 @@ function admissionSlotOf(res: express.Response): AdmissionSlot | undefined {
 let inFlight = 0
 let shedTotal = 0
 let pingsFastPathed = 0
+
+// Declared body bytes admitted at once. The per-request parser limit bounds one
+// body; it says nothing about their sum. MAX_IN_FLIGHT near-maximum attachment
+// sends parsed into the heap together (each ~2x its wire size as a string plus
+// the decoded base64) would exhaust the heap — the 2026-07-21 crash-then-
+// reconnect-storm class, reachable from the outside with ordinary requests.
+// Default: a quarter of the heap limit, floored at one maximum request so a
+// lone large send can never be shed by configuration. A request that declares
+// no length (chunked) costs nothing here; the parser limit still caps it.
+const MAX_IN_FLIGHT_BYTES = Math.max(
+    MAX_REQUEST_BODY_BYTES,
+    parseInt(process.env.AGENTMAIL_MAX_IN_FLIGHT_BYTES || '', 10) ||
+        Math.floor(v8.getHeapStatistics().heap_size_limit / 4)
+)
+let inFlightBytes = 0
+
+function declaredBodyBytes(req: express.Request): number {
+    const declared = Number.parseInt(String(req.headers?.['content-length'] ?? ''), 10)
+    return Number.isFinite(declared) && declared > 0 ? declared : 0
+}
 // Log the transition, not the event: at overload the shed rate is exactly the
 // excess arrival rate, so per-request logging would itself become a load source.
 let shedding = false
 
-function overloadReason(): string | undefined {
+function overloadReason(incomingBytes = 0): string | undefined {
     if (recentLagMs > MAX_EVENT_LOOP_LAG_MS) {
         return `event loop ${Math.round(recentLagMs)} ms behind (limit ${MAX_EVENT_LOOP_LAG_MS} ms)`
     }
     if (inFlight >= MAX_IN_FLIGHT) {
         return `${inFlight} in flight at or above cap ${MAX_IN_FLIGHT}`
     }
+    if (inFlightBytes + incomingBytes > MAX_IN_FLIGHT_BYTES) {
+        return `${inFlightBytes + incomingBytes} declared body bytes would exceed budget ${MAX_IN_FLIGHT_BYTES}`
+    }
     return undefined
 }
 
 export const admissionControl: express.RequestHandler = (req, res, next) => {
-    const reason = overloadReason()
+    const incomingBytes = declaredBodyBytes(req)
+    const reason = overloadReason(incomingBytes)
     if (reason) {
         shedTotal++
         if (!shedding) {
@@ -1727,6 +1755,7 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
             if (released) return
             released = true
             inFlight--
+            inFlightBytes -= incomingBytes
             if (shedding && !overloadReason()) {
                 shedding = false
                 console.warn(
@@ -1758,6 +1787,7 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
     // means anything that throws in between leaks a slot permanently, and enough
     // leaks silently pin the server in shedding with nothing actually running.
     inFlight++
+    inFlightBytes += incomingBytes
     next()
 }
 
@@ -1847,9 +1877,10 @@ app.get(['/', '/mcp'], (req, res, next) => {
 
 // MCP endpoints, ordered cheapest-first so an overloaded server spends as little
 // as possible on a request it is about to reject: statelessMethodGuard sheds
-// GET/DELETE, admissionControl caps concurrency, requestTimeout guarantees slots
-// come back, and only then does a request earn body parsing, Clerk
-// authentication, and a per-request MCP server.
+// GET/DELETE, pings are answered from a ≤1 KiB body parse that holds no slot,
+// admissionControl caps concurrency and declared body bytes, requestTimeout
+// guarantees slots come back, and only then does a request earn full body
+// parsing, Clerk authentication, and a per-request MCP server.
 // ============================================================================
 // Ping fast path
 //
@@ -1860,20 +1891,33 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // quota-throttled machine with a ~62 ms/s budget, pings alone consumed most of
 // the sustained capacity.
 //
-// Answering here, right after body parse, costs ~0.05 ms and is spec-correct:
-// Streamable HTTP allows a plain application/json JSON-RPC response, and ping's
-// result is always {}.
+// Answering here costs ~0.05 ms and is spec-correct: Streamable HTTP allows a
+// plain application/json JSON-RPC response, and ping's result is always {}.
 //
-// Deliberately NOT rate-limited, and answered without auth. A ping is how
-// clients decide the server is alive; reject or drop one and the client tears
-// down and re-initializes — initialize + notifications/initialized + tools/list,
-// three full-path requests, ~200x the cost of answering. The answer itself is
-// the cheapest possible defense; genuine overload is already handled by
-// admissionControl upstream, which sheds everything alike. Skipping auth is the
-// point (verification is most of the per-ping cost) and leaks nothing — the
-// response is a constant. The one observable change: an unauthenticated ping
-// now gets 200 instead of the 401 challenge; real requests still 401.
+// Deliberately NOT rate-limited, answered without auth, and answered BEFORE
+// admission control. A ping is how clients decide the server is alive; reject
+// or drop one and the client tears down and re-initializes — initialize +
+// notifications/initialized + tools/list, three full-path requests, ~200x the
+// cost of answering. A shed ping is therefore the one 503 that makes overload
+// worse, arriving exactly when capacity is scarcest. Skipping auth is the point
+// (verification is most of the per-ping cost) and leaks nothing — the response
+// is a constant. The one observable change: an unauthenticated ping gets 200
+// instead of the 401 challenge; real requests still 401.
+//
+// Reaching the method before admission means parsing the body before
+// admission. Only bodies that declare at most SMALL_BODY_LIMIT bytes are read
+// here — microseconds, no slot held — and anything larger is not a ping and
+// waits for admission as before. express.json skips a body it already parsed,
+// so the full-size parser downstream is a no-op for these requests.
 // ============================================================================
+
+const SMALL_BODY_LIMIT = 1024
+const parseSmallJsonBody = express.json({ limit: SMALL_BODY_LIMIT })
+const smallBodyJson: express.RequestHandler = (req, res, next) => {
+    const declared = declaredBodyBytes(req)
+    if (declared === 0 || declared > SMALL_BODY_LIMIT) return next()
+    parseSmallJsonBody(req, res, next)
+}
 
 const pingFastPath: express.RequestHandler = (req, res, next) => {
     const body = req.body as unknown
@@ -1954,10 +1998,11 @@ const mcpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) =
 
 const mcpPipeline = [
     statelessMethodGuard,
+    smallBodyJson,
+    pingFastPath,
     admissionControl,
     requestTimeout,
     parseJsonBody,
-    pingFastPath,
     clerkAuthBoundary,
     authRouter,
     mcpHandler,
@@ -2016,6 +2061,8 @@ app.get('/health', (_req, res) => {
         requests: {
             in_flight: inFlight,
             max_in_flight: MAX_IN_FLIGHT,
+            in_flight_bytes: inFlightBytes,
+            max_in_flight_bytes: MAX_IN_FLIGHT_BYTES,
             shed_total: shedTotal,
             event_loop_lag_ms: Math.round(recentLagMs),
             max_event_loop_lag_ms: MAX_EVENT_LOOP_LAG_MS,
@@ -2174,15 +2221,39 @@ export function startListening(port: number = PORT) {
     server.on('connection', () => {
         acceptedTotal++
     })
+    // Both headers are client-controlled, so they are bucketed into a fixed key
+    // set: a process-lifetime map keyed by the raw value grew with every
+    // distinct string a client chose to send, and /health echoed it all back.
     server.on('request', (req) => {
-        const c = (req.headers.connection ?? '(none)').toLowerCase()
+        const raw = req.headers.connection?.toLowerCase()
+        const c = raw === undefined ? '(none)' : CONNECTION_HEADER_BUCKETS.has(raw) ? raw : 'other'
         connectionHeaderSeen[c] = (connectionHeaderSeen[c] ?? 0) + 1
-        httpVersionSeen[req.httpVersion] = (httpVersionSeen[req.httpVersion] ?? 0) + 1
+        const v = HTTP_VERSION_BUCKETS.has(req.httpVersion) ? req.httpVersion : 'other'
+        httpVersionSeen[v] = (httpVersionSeen[v] ?? 0) + 1
     })
     // Parse errors and socket-level timeouts surface here, not in Express. A
     // climbing count means sockets are being torn down abnormally.
-    server.on('clientError', () => {
+    //
+    // Attaching any listener disables Node's default handling — write a status
+    // line, destroy the socket — so it is reproduced here (mirrors
+    // lib/_http_server.js socketOnError). With only the counter, a socket that
+    // sent unparseable bytes stayed open until the peer chose to close it: a
+    // descriptor leak any client could drive at will.
+    server.on('clientError', (err: NodeJS.ErrnoException, socket: Duplex) => {
         clientErrorsTotal++
+        if (err.code === 'ECONNRESET' || !socket.writable) {
+            socket.destroy()
+            return
+        }
+        const status =
+            err.code === 'HPE_HEADER_OVERFLOW'
+                ? '431 Request Header Fields Too Large'
+                : err.code === 'ERR_HTTP_REQUEST_TIMEOUT'
+                  ? '408 Request Timeout'
+                  : '400 Bad Request'
+        // end() flushes the status line before the FIN; destroy afterwards so a
+        // peer that never closes its side cannot keep the socket half-open.
+        socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`, () => socket.destroy())
     })
     const sampler = setInterval(() => {
         server.getConnections((err, count) => {
