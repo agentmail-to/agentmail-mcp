@@ -71,6 +71,31 @@ returned there would be a no-op for exactly the requests that need it.
 
 `AGENTMAIL_SHED_RETRY_AFTER_SECONDS` (default 2) sets the `Retry-After` value.
 
+A `504` marks the request as timed out, and the MCP handler refuses to run a
+tool for a request that has already been answered or whose client has gone.
+Otherwise a slow body upload or Clerk round trip that outlived the timeout
+would resume, build a server, and execute the tool (send the email) into a
+closed response that the client already saw fail and will retry.
+`requests.skipped_after_timeout` in `/health` counts these.
+
+JSON-RPC batch bodies (arrays) are rejected with `400`. Batching was removed
+from the MCP spec in 2025-06-18 and no client seen here sends one, but the SDK
+transport still dispatches up to 100 messages from one array, which would put
+100 tool calls through one admission slot. `requests.batches_rejected` counts
+them.
+
+## Graceful shutdown
+
+On `SIGTERM` or `SIGINT` the server stops accepting, closes idle keep-alive
+connections, answers `/health` with `503 draining`, sheds new MCP requests with
+`503` + `Retry-After` + `Connection: close`, and waits for in-flight requests
+for up to `AGENTMAIL_DRAIN_TIMEOUT_MS` (default 8000) before exiting. Without
+this every deploy killed in-flight tool calls after their upstream side effect
+and reset every open connection at once, which clients answered with a
+synchronized reconnect at the replacement process. The platform's own kill
+grace period bounds the window from outside; if it is shorter than the drain
+timeout the drain is simply cut short, never worse than before.
+
 A slot is held until the handler settles, not until the client disconnects, and
 the MCP request's abort signal is injected into the AgentMail SDK through a custom
 `fetch`. agentmail-toolkit does not forward `extra.signal`, so without that a
