@@ -138,6 +138,23 @@ that separates "our code is slow" from "the host is withholding CPU". Sustained
 steal above 50% logs `[cpu] steal pressure` and means the machine size, not the
 code, is the constraint.
 
+## Protocol fast path
+
+`initialize`, `notifications/initialized`, and `tools/list` are 93% of
+non-ping traffic and have constant answers on this server (the same tools are
+registered for every request). They are answered after authentication from a
+snapshot taken once through the SDK's own client over an in-memory transport,
+so the cached bytes are what the full path would have produced. Only the
+request id and the negotiated protocol version vary per request. Measured CPU
+per request: initialize 0.80 → 0.14 ms, initialized 0.71 → 0.13 ms,
+tools/list 2.35 → 0.33 ms.
+
+A body the SDK's strict schemas would reject (extra keys, a missing
+`clientInfo.version`, an unsupported `mcp-protocol-version` header) falls
+through to the SDK and gets its error, never a cached success. Authentication
+is unchanged: the fast path sits after the auth router. `/health` reports
+`requests.protocol_fast_path`; `AGENTMAIL_PROTOCOL_FAST_PATH=0` disables it.
+
 ## Ping fast path
 
 MCP `ping` (about two thirds of all traffic) is answered immediately after body
