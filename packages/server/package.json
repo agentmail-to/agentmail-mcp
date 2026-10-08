@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "@clerk/express": "2.1.40",
-    "@clerk/mcp-tools": "0.3.1",
     "@modelcontextprotocol/sdk": "1.32.1",
     "agentmail": "0.5.37",
     "agentmail-toolkit": "0.12.0",

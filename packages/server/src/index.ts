@@ -23,12 +23,6 @@
 import express from 'express'
 import cors from 'cors'
 import { clerkClient, clerkMiddleware } from '@clerk/express'
-import {
-    mcpAuthClerk,
-    protectedResourceHandlerClerk,
-    authServerMetadataHandlerClerk,
-    streamableHttpHandler,
-} from '@clerk/mcp-tools/express'
 import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -1184,6 +1178,122 @@ export function clerkOAuthPreflight(req: unknown): boolean {
     }
 }
 
+/** The MCP SDK's AuthInfo shape, as @clerk/mcp-tools used to install it on req.auth. */
+type ClerkAuthInfo = { token: string; scopes: string[]; clientId: string; extra: { userId: string } }
+
+/**
+ * Turn the auth object clerkMiddleware installed into an MCP AuthInfo for an
+ * accepted OAuth token. Returns undefined when any of userId/clientId/scopes
+ * is missing, which is what @clerk/mcp-tools' verifyClerkToken refused too.
+ */
+export function buildClerkAuthInfo(req: unknown, token: string | undefined): ClerkAuthInfo | undefined {
+    if (!token) return undefined
+    const authFn = (req as { auth?: unknown }).auth
+    if (typeof authFn !== 'function') return undefined
+    const auth = (
+        authFn as (options: { acceptsToken: 'oauth_token' }) => {
+            isAuthenticated?: boolean
+            tokenType?: string
+            userId?: string | null
+            clientId?: string | null
+            scopes?: string[] | null
+        }
+    )({ acceptsToken: 'oauth_token' })
+    if (auth?.isAuthenticated !== true || auth.tokenType !== 'oauth_token') return undefined
+    if (!auth.userId || !auth.clientId || !auth.scopes) return undefined
+    return { token, scopes: auth.scopes, clientId: auth.clientId, extra: { userId: auth.userId } }
+}
+
+// ============================================================================
+// OAuth discovery metadata (RFC 9728 protected resource metadata, and the
+// authorization server metadata proxied from Clerk's frontend API). These used
+// to come from @clerk/mcp-tools; the shapes below are byte-for-byte what it
+// produced, so clients see no change. Owning them removes the last dependency
+// that pins the MCP SDK at v1, and lets the authorization-server fetch be
+// cached and bounded instead of a fresh unbounded request to Clerk per
+// discovery (Cursor runs discovery on every OAuth, the uptime monitor every
+// 3 minutes).
+// ============================================================================
+
+/** Clerk frontend API origin, decoded from the publishable key (pk_<env>_<base64 host$>). */
+export function deriveClerkFapiUrl(publishableKey: string): string {
+    const key = publishableKey.replace(/^pk_(test|live)_/, '')
+    const decoded = Buffer.from(key, 'base64').toString('utf8')
+    return `https://${decoded.replace(/\$/, '')}`
+}
+
+export function protectedResourceMetadataFor(
+    publishableKey: string,
+    resourceUrl: string,
+    properties: Record<string, unknown>
+): Record<string, unknown> {
+    const authServerUrl = deriveClerkFapiUrl(publishableKey)
+    return {
+        resource: resourceUrl,
+        authorization_servers: [authServerUrl],
+        token_types_supported: ['urn:ietf:params:oauth:token-type:access_token'],
+        token_introspection_endpoint: `${authServerUrl}/oauth/token`,
+        token_introspection_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic'],
+        jwks_uri: `${authServerUrl}/.well-known/jwks.json`,
+        authorization_data_types_supported: ['oauth_scope'],
+        authorization_data_locations_supported: ['header', 'body'],
+        key_challenges_supported: [
+            { challenge_type: 'urn:ietf:params:oauth:pkce:code_challenge', challenge_algs: ['S256'] },
+        ],
+        service_documentation: 'https://clerk.com/docs',
+        ...properties,
+    }
+}
+
+/** The resource this metadata describes: the request URL minus the well-known prefix. */
+function resourceUrlOf(req: express.Request): string {
+    const url = new URL(`${req.protocol}://${req.get('host')}${req.originalUrl}`)
+    url.pathname = url.pathname.replace(/\.well-known\/oauth-protected-resource\/?/, '')
+    return url.toString()
+}
+
+const AS_METADATA_TTL_MS = 5 * 60_000
+const AS_METADATA_TIMEOUT_MS = 5_000
+
+type AsMetadataCache = { value?: Record<string, unknown>; fetchedAt: number; inFlight?: Promise<Record<string, unknown>> }
+const asMetadataCache: AsMetadataCache = { fetchedAt: 0 }
+
+/**
+ * Clerk's authorization-server metadata, cached for AS_METADATA_TTL_MS with a
+ * single in-flight refresh, served stale when Clerk is slow or down. Only a
+ * cold cache surfaces a Clerk failure to the client.
+ */
+export async function fetchClerkAuthServerMetadata(
+    publishableKey: string,
+    deps: { fetcher?: typeof fetch; now?: () => number; cache?: AsMetadataCache; ttlMs?: number } = {}
+): Promise<Record<string, unknown>> {
+    const { fetcher = fetch, now = Date.now, cache = asMetadataCache, ttlMs = AS_METADATA_TTL_MS } = deps
+    if (cache.value && now() - cache.fetchedAt < ttlMs) return cache.value
+    if (!cache.inFlight) {
+        cache.inFlight = (async () => {
+            const response = await fetcher(`${deriveClerkFapiUrl(publishableKey)}/.well-known/oauth-authorization-server`, {
+                signal: AbortSignal.timeout(AS_METADATA_TIMEOUT_MS),
+            })
+            if (!response.ok) throw new Error(`Clerk authorization-server metadata returned HTTP ${response.status}`)
+            const value = (await response.json()) as Record<string, unknown>
+            cache.value = value
+            cache.fetchedAt = now()
+            return value
+        })().finally(() => {
+            cache.inFlight = undefined
+        })
+    }
+    try {
+        return await cache.inFlight
+    } catch (error) {
+        if (cache.value) {
+            console.warn('[oauth] serving stale authorization-server metadata:', error)
+            return cache.value
+        }
+        throw error
+    }
+}
+
 const authRouter: express.RequestHandler = async (req, res, next) => {
     const apiKey = extractApiKey(req)
     if (apiKey) {
@@ -1191,20 +1301,13 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
         return next()
     }
 
-    // No API key. If Clerk is configured, hand off to mcpAuthClerk for OAuth.
+    // No API key. If Clerk is configured, the Bearer token must be a Clerk
+    // OAuth access token that clerkMiddleware (clerkAuthBoundary) accepted.
     if (CLERK_ENABLED) {
-        // Reject malformed Authorization headers BEFORE mcpAuthClerk sees them.
-        // Its inner mcpAuth middleware throws ("Invalid authorization header
-        // value, expected Bearer <token>") when the header carries no token
-        // after the scheme — e.g. a bare "Authorization: Bearer". Crucially,
-        // mcpAuthClerk invokes that middleware as `(await mcpAuth(...))(req,
-        // res, next)` WITHOUT awaiting the resulting promise, so the rejection
-        // is detached from the chain Express 5 tracks: no try/catch or error
-        // middleware can reach it, it surfaces as a process-level unhandled
-        // rejection, and Node exits with code 1. That crash-looped production
-        // three times on 2026-07-19 (10:03/10:13/10:14 UTC). The guard mirrors
-        // mcpAuth's own parse (`header.split(' ')[1]` empty) so we 401 exactly
-        // the requests that would otherwise kill the process.
+        // A header with no token after the scheme (a bare "Authorization:
+        // Bearer") is a 401 challenge. When @clerk/mcp-tools handled this it
+        // threw on a detached promise and crash-looped production three times
+        // on 2026-07-19; the guard stays so the shape is answered, never parsed.
         const authHeader = req.headers.authorization
         if (authHeader && !authHeader.split(' ')[1]) {
             // Don't log the header value: a token joined by non-space
@@ -1226,50 +1329,32 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
             return sendOAuthChallenge(req, res)
         }
 
+        // No header at all: the standard challenge that starts OAuth discovery.
+        if (!authHeader) return sendOAuthChallenge(req, res)
+
         try {
-            return await mcpAuthClerk(req, res, (err) => {
-                if (err) {
-                    // A failure inside the auth middleware is an auth failure:
-                    // challenge the client instead of bubbling a 500.
-                    console.error('[auth] mcpAuthClerk error:', err)
-                    if (!res.headersSent) sendOAuthChallenge(req, res)
-                    return
-                }
-                // mcpAuthClerk (from @clerk/mcp-tools) validates the Bearer token
-                // as a Clerk OAuth access token and, on success, writes an MCP SDK
-                // AuthInfo object directly to req.auth, OVERWRITING the function
-                // set earlier by clerkMiddleware. The AuthInfo shape is:
-                //   { token, scopes, clientId, extra: { userId } }
-                // (see verifyClerkToken in @clerk/mcp-tools/dist/chunk-H4BXCCRK.js)
-                //
-                // IMPORTANT: do NOT use getAuth(req) from @clerk/express here —
-                // that helper calls req.auth(options) expecting a session-token
-                // getter function, but mcpAuthClerk has replaced req.auth with a
-                // plain object, so getAuth() throws "TypeError: req.auth is not
-                // a function". Read the userId directly from req.auth.extra.
-                const authInfo = (
-                    req as unknown as { auth?: { token?: string; extra?: { userId?: string } } }
-                ).auth
-                const userId = authInfo?.extra?.userId
-                // Clerk's user:org:read scope puts the user's selected org in the
-                // access token's `org_id` claim. The @clerk/mcp-tools wrapper
-                // doesn't surface it, so we decode the raw token. Falls back to
-                // undefined if the claim is missing — see resolveClerkConsoleJwt
-                // for how that case is handled (single-org auto-pick vs multi-org
-                // strict reject).
-                const clerkOrgId = extractOrgIdFromClerkToken(authInfo?.token)
-                if (userId) {
-                    req.authSource = { kind: 'clerk', clerkUserId: userId, clerkOrgId }
-                } else {
-                    req.authSource = { kind: 'none' }
-                }
-                next()
-            })
+            const token = authHeader.split(' ')[1]
+            const authInfo = buildClerkAuthInfo(req, token)
+            if (!authInfo) {
+                console.warn('[auth] accepted OAuth token lacks userId/clientId/scopes, returning 401 challenge')
+                return sendOAuthChallenge(req, res)
+            }
+            // The MCP SDK forwards req.auth to tool handlers as extra.authInfo,
+            // so install the AuthInfo object in place of clerkMiddleware's
+            // function, as @clerk/mcp-tools used to.
+            ;(req as unknown as { auth: unknown }).auth = authInfo
+            // Clerk's user:org:read scope puts the user's selected org in the
+            // access token's `org_id` claim; decode it from the raw token. See
+            // resolveClerkConsoleJwt for the missing-claim case.
+            req.authSource = {
+                kind: 'clerk',
+                clerkUserId: authInfo.extra.userId,
+                clerkOrgId: extractOrgIdFromClerkToken(token),
+            }
+            return next()
         } catch (error) {
-            // Errors thrown on the awaited part of mcpAuthClerk (rare; the
-            // detached-rejection path is handled by the guard above). Same
-            // policy: auth-layer failure → 401 challenge, never a crash.
-            console.error('[auth] mcpAuthClerk threw:', error)
+            // Auth-layer failure → 401 challenge, never a crash.
+            console.error('[auth] OAuth token handling threw:', error)
             if (!res.headersSent) sendOAuthChallenge(req, res)
             return
         }
@@ -2306,12 +2391,24 @@ if (CLERK_ENABLED) {
     //
     // `select_organization` (path 3/4) stays as the fallback for tokens that
     // carry no `org_id`.
-    const protectedResourceHandler = protectedResourceHandlerClerk({
-        scopes_supported: ['openid', 'email', 'profile', 'user:org:read'],
-    })
+    const publishableKey = process.env.CLERK_PUBLISHABLE_KEY as string
+    const protectedResourceHandler: express.RequestHandler = (req, res) => {
+        res.json(
+            protectedResourceMetadataFor(publishableKey, resourceUrlOf(req), {
+                scopes_supported: ['openid', 'email', 'profile', 'user:org:read'],
+            })
+        )
+    }
     app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceHandler)
     app.get('/.well-known/oauth-protected-resource', protectedResourceHandler)
-    app.get('/.well-known/oauth-authorization-server', authServerMetadataHandlerClerk)
+    app.get('/.well-known/oauth-authorization-server', async (_req, res) => {
+        try {
+            res.json(await fetchClerkAuthServerMetadata(publishableKey))
+        } catch (error) {
+            console.error('[oauth] authorization-server metadata unavailable:', error)
+            res.status(502).json({ error: 'authorization server metadata unavailable, retry shortly' })
+        }
+    })
 }
 
 app.get('/health', (_req, res) => {

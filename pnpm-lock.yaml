@@ -37,9 +37,6 @@ importers:
       '@clerk/express':
         specifier: 2.1.40
         version: 2.1.40(express@5.2.1)
-      '@clerk/mcp-tools':
-        specifier: 0.3.1
-        version: 0.3.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@modelcontextprotocol/sdk':
         specifier: 1.32.1
         version: 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)
@@ -92,20 +89,6 @@ packages:
     engines: {node: '>=20.9.0'}
     peerDependencies:
       express: ^4.17.0 || ^5.0.0
-
-  '@clerk/mcp-tools@0.3.1':
-    resolution: {integrity: sha512-c/7bmT9KxA3CYVhCS08RGmVwjU8+zJ6ZCuIA5KpcJfE5xh8XLKKvZzOD4mP0GgvUGjcnT+IViaqBRlRKAyE5rw==}
-    peerDependencies:
-      better-sqlite3: ^8.7.0
-      pg: ^8.11.0
-      redis: ^4.0.0
-    peerDependenciesMeta:
-      better-sqlite3:
-        optional: true
-      pg:
-        optional: true
-      redis:
-        optional: true
 
   '@clerk/shared@4.25.2':
     resolution: {integrity: sha512-v7zgDh0eVLl3KzRHbKYTsPQ+4Xcx8A2oiU5iZ9WhME024WudwkjjPJRK12RycY0VA1Sj8i4Pi5zEpecqB/gp1Q==}
@@ -678,14 +661,6 @@ snapshots:
     transitivePeerDependencies:
       - react
       - react-dom
-
-  '@clerk/mcp-tools@0.3.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)':
-    dependencies:
-      '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)
-    transitivePeerDependencies:
-      - '@cfworker/json-schema'
-      - supports-color
-      - zod
 
   '@clerk/shared@4.25.2':
     dependencies:
