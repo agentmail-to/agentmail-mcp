@@ -30,6 +30,18 @@ The deployment provider is an implementation detail. Operational alerts and dash
 
 Authentication hardening is a separate rollout. This migration preserves the current hosted inputs and observable behavior.
 
+## Clerk dependency
+
+Every OAuth tool call needs Clerk's Backend API (membership lookup, and for multi-org users the stored selection); `@clerk/backend` has no request timeout and ignores the request's abort signal. Three bounds keep a slow or rate-limited Clerk from occupying every admission slot:
+
+- `AGENTMAIL_CLERK_TIMEOUT_MS` (default 5000, floor 500): the caller stops waiting and the tool returns a retryable error. The underlying call stays counted until Clerk answers.
+- `AGENTMAIL_MAX_CLERK_IN_FLIGHT` (default 64): above it, OAuth tool calls fail instantly with a retry message instead of queueing; API-key calls are unaffected.
+- `AGENTMAIL_MEMBERSHIP_CACHE_TTL_MS` (default 300000): a user's organization list is cached per process. Removing someone from an organization takes effect on this server within that TTL, which is far tighter than the 24-hour access token. Empty lists and failures are never cached; the stored `select_organization` choice is never cached.
+
+`/health` reports `requests.clerk` (in flight, timeouts, shed, cache size). Set `CLERK_JWT_KEY` (the instance's JWT public key, Clerk Dashboard → API keys) in the deployment environment so access-token verification never needs the JWKS fetch; the secret key stays required for the Backend API calls above.
+
+An expired or rejected OAuth token gets the same `401` + `WWW-Authenticate` challenge as a missing one, so clients restart discovery instead of retrying a dead token.
+
 ## Overload protection
 
 The server sheds load instead of queueing it. Two independent triggers, either of

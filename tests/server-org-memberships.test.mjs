@@ -16,10 +16,13 @@ test('membership lookups fetch past the default page of 10', async () => {
   }))
   const calls = []
 
-  const result = await listUserOrgMemberships('user_in_eleven_orgs', async (params) => {
-    calls.push(params)
-    // Behave like Clerk: no limit means the default page of 10.
-    return { data: memberships.slice(0, params.limit ?? 10), totalCount: memberships.length }
+  const result = await listUserOrgMemberships('user_in_eleven_orgs', {
+    listMemberships: async (params) => {
+      calls.push(params)
+      // Behave like Clerk: no limit means the default page of 10.
+      return { data: memberships.slice(0, params.limit ?? 10), totalCount: memberships.length }
+    },
+    cache: new Map(),
   })
 
   assert.equal(ORG_MEMBERSHIP_PAGE_SIZE, 500, 'the Backend API per-page maximum')
