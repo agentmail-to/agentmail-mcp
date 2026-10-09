@@ -1,22 +1,15 @@
 import { createHash } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.CLERK_PUBLISHABLE_KEY ||= 'pk_test_contract'
 process.env.CLERK_SECRET_KEY ||= 'sk_test_contract'
 
-const { createMcpServer } = await import('../packages/server/build/index.js')
-const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-const server = createMcpServer({ kind: 'apiKey', apiKey: 'contract-only' })
-const client = new Client({ name: 'manifest-generator', version: '1.0.0' })
-
-await server.connect(serverTransport)
-await client.connect(clientTransport)
-const { tools } = await client.listTools()
-await client.close()
-await server.close()
+// The catalog exactly as served: the same raw tools/list result the protocol
+// fast path answers with, taken from the full SDK path. Not through an SDK
+// client, which would drop any field newer than the client.
+const { loadProtocolSnapshot } = await import('../packages/server/build/index.js')
+const { tools } = JSON.parse((await loadProtocolSnapshot()).toolsListJson)
 
 const oauthToolNames = new Set(['list_organizations', 'select_organization'])
 // Historical flag, now always empty: credential requirements are the API's to

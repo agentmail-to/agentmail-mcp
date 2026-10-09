@@ -30,6 +30,31 @@ The deployment provider is an implementation detail. Operational alerts and dash
 
 Authentication hardening is a separate rollout. This migration preserves the current hosted inputs and observable behavior.
 
+## Protocol versions
+
+The server runs MCP SDK v2 (`@modelcontextprotocol/server` with the
+`@modelcontextprotocol/node` adapter). One handler serves both protocol eras
+from the same server factory:
+
+- 2026-07-28 clients (`server/discover`, a per-request `_meta` envelope plus
+  matching `MCP-Protocol-Version` and `Mcp-Method` headers, no `initialize`) on
+  the SDK's modern path. Header/body mismatches are the SDK's `-32020`.
+- 2025-era clients (`initialize` handshake, every client in production today)
+  through the SDK's stateless legacy fallback, as before.
+
+Authentication is identical for both: `server/discover` without credentials
+gets the same `401` OAuth challenge as `initialize`. The auth source the router
+resolves reaches the server factory through the SDK's pass-through `AuthInfo`
+(`extra["agentmail/authSource"]`).
+
+SDK v2 publishes tool schemas as JSON Schema draft 2020-12 (v1 published
+draft-07) and no longer adds `execution: { taskSupport: "forbidden" }` to every
+tool. Field names and types are unchanged.
+
+SDK clients parse results through their own schemas and drop keys they do not
+recognize, including unknown server capabilities. Test what the server sends by
+reading the HTTP response, not a client's parsed view.
+
 ## Clerk dependency
 
 Every OAuth tool call needs Clerk's Backend API (membership lookup, and for multi-org users the stored selection); `@clerk/backend` has no request timeout and ignores the request's abort signal. Three bounds keep a slow or rate-limited Clerk from occupying every admission slot:
@@ -66,7 +91,7 @@ cost shedding exists to avoid and the cost that accumulates during a retry storm
 
 `AGENTMAIL_REQUEST_TIMEOUT_MS` (default 30000) reclaims any request that would
 otherwise hold a slot indefinitely. Before headers go out it returns `504`. Once
-they have, it destroys the connection instead — `StreamableHTTPServerTransport`
+they have, it destroys the connection instead — the SDK's 2025-era transport
 writes SSE headers before a `tools/call` handler settles, so every hung tool call
 is already past the point where a status can be sent, and a timeout that merely
 returned there would be a no-op for exactly the requests that need it.
@@ -100,7 +125,7 @@ timeout the drain is simply cut short, never worse than before.
 
 A slot is held until the handler settles, not until the client disconnects, and
 the MCP request's abort signal is injected into the AgentMail SDK through a custom
-`fetch`. agentmail-toolkit does not forward `extra.signal`, so without that a
+`fetch`. agentmail-toolkit does not forward the request's abort signal, so without that a
 client abort left the upstream HTTP request running to completion while the server
 reported zero in flight — letting timed-out clients rebuild unbounded background
 work behind a cap that looked healthy.
@@ -145,9 +170,11 @@ code, is the constraint.
 `initialize`, `notifications/initialized`, and `tools/list` are 93% of
 non-ping traffic and have constant answers on this server (the same tools are
 registered for every request). They are answered after authentication from a
-snapshot taken once through the SDK's own client over an in-memory transport,
-so the cached bytes are what the full path would have produced. Only the
-request id and the negotiated protocol version vary per request. Measured CPU
+snapshot taken once by sending those requests through the full SDK handler and
+keeping the raw JSON-RPC results, so the cached bytes are what the full path
+produces. Only the request id and the negotiated protocol version vary per
+request. The fast path serves 2025-era requests only: anything carrying a
+2026-07-28 envelope or header goes to the SDK. Measured CPU
 per request: initialize 0.80 → 0.14 ms, initialized 0.71 → 0.13 ms,
 tools/list 2.35 → 0.33 ms.
 
@@ -155,7 +182,10 @@ A body the SDK's strict schemas would reject (extra keys, a missing
 `clientInfo.version`, an unsupported `mcp-protocol-version` header) falls
 through to the SDK and gets its error, never a cached success. Authentication
 is unchanged: the fast path sits after the auth router. `/health` reports
-`requests.protocol_fast_path`; `AGENTMAIL_PROTOCOL_FAST_PATH=0` disables it.
+`requests.protocol_fast_path`; `AGENTMAIL_PROTOCOL_FAST_PATH=0` disables it,
+read per request, so it takes effect without a restart. The SDK v2 full path
+costs more than v1 did (initialize ~1.2 ms, tools/list ~2.8 ms, server/discover
+~1.2 ms), which the fast path absorbs for 2025-era traffic.
 
 ## Ping fast path
 
