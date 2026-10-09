@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:e8f67a3e48a2f4da9af9f379672befcf25de94527fb4d829964b30d6788cfc51",
+  "digest": "sha256:30afc40c53c0d81c25382dcd53f1d96f02614aab9a175bb06da7cdd693cca7b9",
   "tools": [
     {
       "name": "list_inboxes",
@@ -2818,7 +2818,7 @@
     {
       "name": "create_draft",
       "title": "Create Draft",
-      "description": "Create a draft email. Use sendAt (ISO 8601 datetime) to schedule it for later sending.",
+      "description": "Create a draft email. Without sendAt, saves an unsent draft. With sendAt (ISO 8601 datetime), schedules automatic sending to the specified recipients without another tool call. Attachment URLs are fetched when creating the draft.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3098,9 +3098,9 @@
       "annotations": {
         "title": "Create Draft",
         "readOnlyHint": false,
-        "destructiveHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
-        "openWorldHint": false
+        "openWorldHint": true
       },
       "execution": {
         "taskSupport": "forbidden"
@@ -3460,7 +3460,7 @@
     {
       "name": "update_draft",
       "title": "Update Draft",
-      "description": "Update a draft. Use sendAt to reschedule a scheduled draft.",
+      "description": "Update a draft email. Use sendAt (ISO 8601 datetime) to schedule or reschedule automatic sending without another tool call. Changes to a scheduled draft affect the content and recipients of the email sent at that time.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3656,7 +3656,7 @@
         "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": true
       },
       "execution": {
         "taskSupport": "forbidden"
