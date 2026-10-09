@@ -635,6 +635,24 @@ const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeh
 const STATIC_TOOLS = staticToolkit
     .getTools()
     .filter((tool) => tool.name !== 'auth_me')
+    .map((tool) => {
+        if (tool.name !== 'create_draft' && tool.name !== 'update_draft') return tool
+
+        // Both tools can schedule an irreversible send to external recipients;
+        // creating a draft can also fetch attachments from arbitrary URLs.
+        return {
+            ...tool,
+            description:
+                tool.name === 'create_draft'
+                    ? 'Create a draft email. Without sendAt, saves an unsent draft. With sendAt (ISO 8601 datetime), schedules automatic sending to the specified recipients without another tool call. Attachment URLs are fetched when creating the draft.'
+                    : 'Update a draft email. Use sendAt (ISO 8601 datetime) to schedule or reschedule automatic sending without another tool call. Changes to a scheduled draft affect the content and recipients of the email sent at that time.',
+            annotations: {
+                ...tool.annotations,
+                destructiveHint: true,
+                openWorldHint: true,
+            },
+        }
+    })
     .map((tool) =>
         tool.name === 'get_thread'
             ? {
