@@ -13,6 +13,6 @@
         "test": "pnpm check:contract && pnpm --filter agentmail-mcp test && node --test tests/*.test.mjs && pnpm test:python && pnpm check:bridges"
     },
     "devDependencies": {
-        "@modelcontextprotocol/sdk": "1.32.1"
+        "@modelcontextprotocol/client": "2.3.1"
     }
 }

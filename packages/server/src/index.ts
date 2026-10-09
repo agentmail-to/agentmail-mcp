@@ -16,8 +16,13 @@
  *      Client passes ?apiKey=am_... or x-api-key header. We hand the key
  *      straight to AgentMailClient. No Clerk involvement.
  *
- * The two paths are checked in order. If neither is present, mcpAuthClerk
+ * The two paths are checked in order. If neither is present, authRouter
  * returns 401 + WWW-Authenticate to bootstrap the OAuth flow.
+ *
+ * Protocol: MCP SDK v2. One handler serves both eras from the same server
+ * factory: 2026-07-28 requests (server/discover, per-request envelope, no
+ * initialize) on the modern path, and 2025-era clients (initialize handshake)
+ * through the SDK's stateless legacy fallback.
  */
 
 import express from 'express'
@@ -25,11 +30,15 @@ import cors from 'cors'
 import { clerkClient, clerkMiddleware } from '@clerk/express'
 import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js'
+import {
+    McpServer,
+    createMcpHandler,
+    LATEST_PROTOCOL_VERSION,
+    PROTOCOL_VERSION_META_KEY,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    type AuthInfo,
+} from '@modelcontextprotocol/server'
+import { toNodeHandler } from '@modelcontextprotocol/node'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
 import v8 from 'node:v8'
@@ -571,7 +580,7 @@ async function buildClientFromClerkUser(
 /**
  * Wrap fetch so every AgentMail request inherits the MCP request's cancellation.
  *
- * agentmail-toolkit does not forward `extra.signal` into the SDK, so without
+ * agentmail-toolkit does not forward the MCP request's abort signal into the SDK, so without
  * this a client that disconnects leaves its AgentMail HTTP request running to
  * completion. That is invisible work: the connection is gone, nothing will read
  * the response, and the retry the client just issued adds another one on top.
@@ -791,23 +800,27 @@ export function createMcpServer(auth: AuthSource): McpServer {
     }
 
     for (const tool of STATIC_TOOLS) {
-        server.registerTool(tool.name, tool, async (args, extra) => {
+        // agentmail-toolkit types its schemas through SDK v1's zod-compat
+        // types; at runtime they are the same zod v4 objects v2 converts.
+        const config = {
+            ...tool,
+            inputSchema: tool.inputSchema as unknown as Record<string, z.ZodType>,
+            outputSchema: tool.outputSchema as unknown as Record<string, z.ZodType>,
+        }
+        server.registerTool(tool.name, config, async (args: Record<string, unknown>, ctx) => {
+            const signal = ctx.mcpReq.signal
             try {
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
-                    client = await buildClientFromClerkUser(
-                        auth.clerkUserId,
-                        auth.clerkOrgId,
-                        extra?.signal
-                    )
+                    client = await buildClientFromClerkUser(auth.clerkUserId, auth.clerkOrgId, signal)
                 } else if (auth.kind === 'apiKey') {
-                    client = buildClientFromApiKey(auth.apiKey, extra?.signal)
+                    client = buildClientFromApiKey(auth.apiKey, signal)
                 } else {
                     return noAuthMessage
                 }
 
                 if (tool.name === 'get_thread') {
-                    return runGetThread(tool, client, args, extra?.signal)
+                    return runGetThread(tool, client, args, signal)
                 }
 
                 // The toolkit's own callbacks are bound to the placeholder
@@ -1858,7 +1871,7 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
 
     // A client abort must NOT free the slot while the handler is still working.
     // transport.close() only aborts the MCP-level signal; agentmail-toolkit
-    // ignores extra.signal, so the AgentMail HTTP request it started keeps
+    // ignores the request's abort signal, so the AgentMail HTTP request it started keeps
     // running. Releasing on abort would let a timed-out client immediately retry
     // into a fresh slot and stack a second live upstream call behind a cap that
     // reads healthy — rebuilding exactly the unbounded background concurrency
@@ -1930,11 +1943,31 @@ export const requestTimeout: express.RequestHandler = (req, res, next) => {
     next()
 }
 
-// MCP request handler. We don't use streamableHttpHandler here because it
-// pre-binds an MCP server; we want to construct ours per-request based on
-// the resolved auth source. Only POST reaches this handler: text/html GETs
-// are redirected to the docs above, all other GETs and DELETEs get a 405
-// from statelessMethodGuard.
+// One SDK handler for the whole process. Per request it classifies the
+// protocol era (2026-07-28 envelope vs 2025-era initialize handshake) and
+// builds a fresh McpServer from createMcpServer for that one exchange, so
+// nothing is shared between requests. The auth source authRouter resolved is
+// the only per-request input; it rides to the factory inside AuthInfo.extra,
+// the SDK's pass-through slot (toNodeHandler forwards req.auth as authInfo).
+const AUTH_SOURCE_KEY = 'agentmail/authSource'
+
+function authSourceFrom(authInfo: AuthInfo | undefined): AuthSource {
+    const value = authInfo?.extra?.[AUTH_SOURCE_KEY] as AuthSource | undefined
+    return value && (value.kind === 'clerk' || value.kind === 'apiKey' || value.kind === 'none')
+        ? value
+        : { kind: 'none' }
+}
+
+const mcpHttp = createMcpHandler((ctx) => createMcpServer(authSourceFrom(ctx.authInfo)), {
+    onerror: (error) => console.error('[mcp] request error:', error),
+})
+const mcpNodeHandler = toNodeHandler(mcpHttp, {
+    onerror: (error) => console.error('[mcp] adapter error:', error),
+})
+
+// MCP request handler. Only POST reaches this handler: text/html GETs are
+// redirected to the docs above, all other GETs and DELETEs get a 405 from
+// statelessMethodGuard.
 export const mcpHandler: express.RequestHandler = async (req, res) => {
     // Take the slot off the connection lifecycle: from here the request is only
     // done when this handler settles, not when the client stops listening.
@@ -1951,12 +1984,19 @@ export const mcpHandler: express.RequestHandler = async (req, res) => {
         return
     }
     try {
-        const authSource = req.authSource ?? { kind: 'none' }
-        const server = createMcpServer(authSource)
-        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-        res.on('close', () => transport.close())
-        await server.connect(transport)
-        await transport.handleRequest(req, res, req.body)
+        // authRouter already installed an AuthInfo for OAuth requests; keep its
+        // fields and add the resolved auth source. API-key and unauthenticated
+        // requests get a minimal AuthInfo carrying only the source.
+        const existing = (req as unknown as { auth?: Partial<AuthInfo> }).auth
+        const authInfo: AuthInfo = {
+            token: existing?.token ?? '',
+            clientId: existing?.clientId ?? '',
+            scopes: existing?.scopes ?? [],
+            extra: { ...(existing?.extra ?? {}), [AUTH_SOURCE_KEY]: req.authSource ?? { kind: 'none' } },
+        }
+        ;(req as unknown as { auth: AuthInfo }).auth = authInfo
+        // express.json already consumed the stream; hand the parsed body over.
+        await mcpNodeHandler(req as never, res as never, req.body)
     } catch (error) {
         console.error('[mcp] request error:', error)
         if (!res.headersSent) {
@@ -2021,10 +2061,17 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // transport. Measured: tools/list 2.3 ms CPU vs 0.25 ms for a ping on the
 // same path; initialize 0.8 ms.
 //
-// The answers are taken from the real server exactly once, through the SDK's
-// own client over an in-memory transport, so what is cached is what the full
-// path would have produced, including the SDK's schema conversion. They are
-// serialized once; each request only splices in its id.
+// The answers are taken exactly once from the full path itself: the snapshot
+// sends real requests through the same SDK handler and keeps the raw JSON-RPC
+// results, so what is cached is byte-for-byte what the full path produces,
+// including the SDK's schema conversion. (Not through an SDK client: clients
+// parse results through their own schemas and drop fields they do not know,
+// which would silently strip anything newer than the client.) Each request
+// only splices in its id.
+//
+// Only 2025-era requests use it. A 2026-07-28 request (MCP-Protocol-Version
+// outside the 2025 list, or a per-request protocol-version envelope in
+// params._meta) always goes to the SDK, which owns that era's validation.
 //
 // Fidelity rules, so the cached answer is never given where the SDK would
 // have refused: the body must already be the exact shape the SDK's strict
@@ -2035,7 +2082,9 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // Streamable HTTP permits a plain application/json response to any POST.
 // ============================================================================
 
-const PROTOCOL_FAST_PATH_ENABLED = process.env.AGENTMAIL_PROTOCOL_FAST_PATH !== '0'
+// Read per request so the full path can be compared against the fast path
+// in-process (tests) and the switch takes effect without a restart.
+const protocolFastPathEnabled = () => process.env.AGENTMAIL_PROTOCOL_FAST_PATH !== '0'
 
 type ProtocolSnapshot = {
     /** Serialized initialize result, keyed by negotiated protocol version. */
@@ -2047,41 +2096,51 @@ type ProtocolSnapshot = {
 
 let protocolSnapshot: Promise<ProtocolSnapshot> | undefined
 
+/** One request through the full SDK path; returns the raw JSON-RPC result. */
+async function fullPathResult(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    const response = await mcpHttp.fetch(
+        new Request('http://snapshot.invalid/mcp', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 0, method, ...(params && { params }) }),
+        })
+    )
+    const text = await response.text()
+    // The 2025-era leg answers as a one-event SSE stream; take its data line.
+    const payload = response.headers.get('content-type')?.includes('text/event-stream')
+        ? text
+              .split('\n')
+              .filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice('data:'.length).trim())
+              .at(-1)
+        : text
+    const message = JSON.parse(payload ?? '') as { result?: unknown; error?: { message?: string } }
+    if (!response.ok || message.result === undefined) {
+        throw new Error(`${method} snapshot failed: HTTP ${response.status} ${message.error?.message ?? ''}`)
+    }
+    return message.result
+}
+
 /**
- * Capture the server's constant protocol answers through the SDK client, once.
- * Exported for tests. A failure clears the memo so the next request retries
- * instead of pinning every request to the slow path forever.
+ * Capture the server's constant 2025-era protocol answers from the full path,
+ * once. Exported for tests and the manifest generator. A failure clears the
+ * memo so the next request retries instead of pinning every request to the
+ * slow path forever.
  */
 export function loadProtocolSnapshot(): Promise<ProtocolSnapshot> {
     if (protocolSnapshot) return protocolSnapshot
     protocolSnapshot = (async () => {
-        const server = createMcpServer({ kind: 'none' })
-        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-        const client = new McpClient({ name: 'agentmail-mcp-snapshot', version: '1.0.0' })
-        try {
-            await server.connect(serverTransport)
-            await client.connect(clientTransport)
-            const { tools } = await client.listTools()
-            const capabilities = client.getServerCapabilities()
-            const serverInfo = client.getServerVersion()
-            const instructions = client.getInstructions()
-            const initializeJson = new Map<string, string>()
-            for (const protocolVersion of SUPPORTED_PROTOCOL_VERSIONS) {
-                initializeJson.set(
-                    protocolVersion,
-                    JSON.stringify({
-                        protocolVersion,
-                        capabilities,
-                        serverInfo,
-                        ...(instructions && { instructions }),
-                    })
-                )
-            }
-            return { initializeJson, toolsListJson: JSON.stringify({ tools }), toolCount: tools.length }
-        } finally {
-            await client.close().catch(() => {})
-            await server.close().catch(() => {})
+        const initializeJson = new Map<string, string>()
+        for (const protocolVersion of SUPPORTED_PROTOCOL_VERSIONS) {
+            const result = await fullPathResult('initialize', {
+                protocolVersion,
+                capabilities: {},
+                clientInfo: { name: 'agentmail-mcp-snapshot', version: '1.0.0' },
+            })
+            initializeJson.set(protocolVersion, JSON.stringify(result))
         }
+        const toolsList = (await fullPathResult('tools/list')) as { tools: unknown[] }
+        return { initializeJson, toolsListJson: JSON.stringify(toolsList), toolCount: toolsList.tools.length }
     })()
     protocolSnapshot.catch(() => {
         protocolSnapshot = undefined
@@ -2104,9 +2163,13 @@ function sendJsonRpcResult(res: express.Response, id: string | number, resultJso
 }
 
 export const protocolFastPath: express.RequestHandler = async (req, res, next) => {
-    if (!PROTOCOL_FAST_PATH_ENABLED) return next()
+    if (!protocolFastPathEnabled()) return next()
     const body = req.body as unknown
     if (!isPlainObject(body) || body.jsonrpc !== '2.0') return next()
+    // A 2026-07-28 request carries its protocol version in params._meta.
+    if (isPlainObject(body.params) && isPlainObject(body.params._meta) && PROTOCOL_VERSION_META_KEY in body.params._meta) {
+        return next()
+    }
     const accept = String(req.headers.accept ?? '')
     if (!accept.includes('application/json') && !accept.includes('*/*')) return next()
     const versionHeader = req.headers['mcp-protocol-version']
