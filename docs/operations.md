@@ -42,6 +42,8 @@ Every OAuth tool call needs Clerk's Backend API (membership lookup, and for mult
 
 An expired or rejected OAuth token gets the same `401` + `WWW-Authenticate` challenge as a missing one, so clients restart discovery instead of retrying a dead token.
 
+OAuth token acceptance and the two discovery documents are implemented in this repository (they came from `@clerk/mcp-tools` until 2026-10; the response shapes are unchanged). `/.well-known/oauth-authorization-server` proxies Clerk's frontend-API metadata with a 5-minute cache, a 5-second fetch timeout, one in-flight refresh, and stale-on-failure, so a slow Clerk cannot stall discovery; only a cold cache surfaces a Clerk failure, as `502`.
+
 ## Overload protection
 
 The server sheds load instead of queueing it. Two independent triggers, either of
