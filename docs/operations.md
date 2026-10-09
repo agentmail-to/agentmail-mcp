@@ -84,6 +84,26 @@ transport still dispatches up to 100 messages from one array, which would put
 100 tool calls through one admission slot. `requests.batches_rejected` counts
 them.
 
+## Idempotent sends
+
+A send whose streamed response the client lost, or that outlived the request
+timeout, is retried by the client, and without protection the email goes out
+twice. The AgentMail API dedups sends on an `Idempotency-Key` header (per
+organization, 24-hour window; a reused key with a different body is a 409).
+The toolkit never sets one, so the server adds it for the four send routes
+(`send_message`, `reply_to_message`, `forward_message`, `send_draft`) through
+the custom fetch every tool-call client uses.
+
+The default key is a hash of the route and request body, so a retry of the
+same tool call produces the same key with no client cooperation. The chosen
+cost: an identical send from the same inbox within 24 hours is treated as a
+retry and returns the original message instead of sending again. When the API
+reports a replay (`Idempotent-Replayed: true`), the tool result carries
+`replayed: true` and a note saying no new email was sent. The send tools take
+an optional `idempotencyKey` (`A-Z a-z 0-9 - . _ ~`, ≤ 256) that overrides the
+hash: pass a new value to send an identical email deliberately, or reuse one
+value as the caller's own dedup identity across retries.
+
 ## Graceful shutdown
 
 On `SIGTERM` or `SIGINT` the server stops accepting, closes idle keep-alive

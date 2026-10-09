@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:e8f67a3e48a2f4da9af9f379672befcf25de94527fb4d829964b30d6788cfc51",
+  "digest": "sha256:158b686069264d7041a712feae122db87efa5c97fcf9c1b300070b92f75037b6",
   "tools": [
     {
       "name": "list_inboxes",
@@ -2183,6 +2183,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "idempotencyKey": {
+            "description": "Deduplication key for this send. By default it is a hash of the request, so an identical send from this inbox within 24 hours returns the original message instead of sending again. Pass a new value to send an identical email deliberately; reuse one value across retries of the same send.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._~-]+$"
           }
         },
         "required": [
@@ -2199,6 +2206,10 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "replayed": {
+            "description": "True when an identical send completed within the last 24 hours and the original message was returned instead of sending again",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2358,6 +2369,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "idempotencyKey": {
+            "description": "Deduplication key for this send. By default it is a hash of the request, so an identical send from this inbox within 24 hours returns the original message instead of sending again. Pass a new value to send an identical email deliberately; reuse one value across retries of the same send.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._~-]+$"
           }
         },
         "required": [
@@ -2374,6 +2392,10 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "replayed": {
+            "description": "True when an identical send completed within the last 24 hours and the original message was returned instead of sending again",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2533,6 +2555,13 @@
           "messageId": {
             "type": "string",
             "description": "ID of message"
+          },
+          "idempotencyKey": {
+            "description": "Deduplication key for this send. By default it is a hash of the request, so an identical send from this inbox within 24 hours returns the original message instead of sending again. Pass a new value to send an identical email deliberately; reuse one value across retries of the same send.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._~-]+$"
           }
         },
         "required": [
@@ -2550,6 +2579,10 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "replayed": {
+            "description": "True when an identical send completed within the last 24 hours and the original message was returned instead of sending again",
+            "type": "boolean"
           }
         },
         "required": [
@@ -3678,6 +3711,13 @@
           "draftId": {
             "type": "string",
             "description": "ID of draft"
+          },
+          "idempotencyKey": {
+            "description": "Deduplication key for this send. By default it is a hash of the request, so an identical send from this inbox within 24 hours returns the original message instead of sending again. Pass a new value to send an identical email deliberately; reuse one value across retries of the same send.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._~-]+$"
           }
         },
         "required": [
@@ -3694,6 +3734,10 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "replayed": {
+            "description": "True when an identical send completed within the last 24 hours and the original message was returned instead of sending again",
+            "type": "boolean"
           }
         },
         "required": [
