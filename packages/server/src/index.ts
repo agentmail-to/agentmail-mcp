@@ -554,13 +554,13 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
  * reaches it. With no retries the error body comes straight back, and it
  * says when a retry can succeed; the MCP client decides whether to make one.
  */
-function buildClient(apiKey: string, signal?: AbortSignal, send?: SendContext): AgentMailClient {
+function buildClient(apiKey: string, signal?: AbortSignal): AgentMailClient {
     return new AgentMailClient({
         environment: AGENTMAIL_API_URL
             ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
             : undefined,
         apiKey,
-        fetch: fetchFor(signal, send),
+        fetch: fetchBoundTo(signal),
         maxRetries: 0,
     })
 }
@@ -569,127 +569,41 @@ function buildClient(apiKey: string, signal?: AbortSignal, send?: SendContext): 
 async function buildClientFromClerkUser(
     clerkUserId: string,
     selectedClerkOrgId?: string,
-    signal?: AbortSignal,
-    send?: SendContext
+    signal?: AbortSignal
 ): Promise<AgentMailClient> {
-    return buildClient(await resolveClerkConsoleJwt(clerkUserId, selectedClerkOrgId), signal, send)
-}
-
-// ============================================================================
-// Idempotent sends
-//
-// A send that outlives the request timeout, or whose streamed response the
-// client lost, is retried by the client — and the email goes out twice. The
-// AgentMail API dedups sends on an Idempotency-Key header (per organization,
-// 24-hour window, 409 on a reused key with a different body), but the toolkit
-// never sets one. The SDK takes a custom fetch, so the header is added here
-// for the four send routes.
-//
-// Default key: a hash of the route and request body. A retry of the same
-// tool call produces the same bytes and therefore the same key, with no
-// client cooperation. The cost, chosen deliberately: an identical send from
-// the same inbox within 24 hours is treated as a retry and returns the
-// original message instead of sending again. The tool result says so when
-// the API reports a replay, and `idempotencyKey` on the send tools overrides
-// the hash for callers that want a deliberate repeat (new key) or their own
-// dedup identity (reused key).
-// ============================================================================
-
-const SEND_TOOLS = new Set(['send_message', 'reply_to_message', 'forward_message', 'send_draft'])
-const SEND_ROUTE =
-    /^\/v0\/inboxes\/[^/]+\/(?:messages\/send|messages\/[^/]+\/(?:reply|reply-all|forward)|drafts\/[^/]+\/send)$/
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~-]+$/
-
-const REPLAYED_NOTE =
-    'Replayed: an identical send from this inbox completed within the last 24 hours, so no new email was ' +
-    'sent and the original message is returned. To send it again deliberately, pass a new idempotencyKey.'
-
-/** Per-tool-call state shared between the tool callback and the fetch it makes. */
-type SendContext = { idempotencyKey?: string; keyUsed?: string; replayed: boolean }
-
-/** The Idempotency-Key for an AgentMail request, or undefined when it is not a send. */
-export function sendIdempotencyKeyFor(url: string, method: string | undefined, body: unknown): string | undefined {
-    if ((method ?? 'GET').toUpperCase() !== 'POST') return undefined
-    let pathname: string
-    try {
-        pathname = new URL(url).pathname
-    } catch {
-        return undefined
-    }
-    if (!SEND_ROUTE.test(pathname)) return undefined
-    const text = typeof body === 'string' ? body : ''
-    return `mcp-${crypto.createHash('sha256').update(`${pathname}\n${text}`).digest('hex')}`
-}
-
-function headerPresent(headers: HeadersInit | undefined, name: string): boolean {
-    if (!headers) return false
-    if (headers instanceof Headers) return headers.has(name)
-    const entries = Array.isArray(headers) ? headers : Object.entries(headers)
-    return entries.some(([key]) => key.toLowerCase() === name.toLowerCase())
-}
-
-function withHeader(headers: HeadersInit | undefined, name: string, value: string): HeadersInit {
-    if (headers instanceof Headers) {
-        const copy = new Headers(headers)
-        copy.set(name, value)
-        return copy
-    }
-    if (Array.isArray(headers)) return [...headers, [name, value]]
-    return { ...(headers ?? {}), [name]: value }
+    return buildClient(await resolveClerkConsoleJwt(clerkUserId, selectedClerkOrgId), signal)
 }
 
 /**
- * The fetch every AgentMail request from a tool call goes through. Two jobs:
+ * Wrap fetch so every AgentMail request inherits the MCP request's cancellation.
  *
- * Cancellation: agentmail-toolkit does not forward `extra.signal` into the
- * SDK, so without this a client that disconnects leaves its AgentMail HTTP
- * request running to completion — invisible work the retry then duplicates.
- * Measured directly: after aborting a streamed tool call, the upstream socket
+ * agentmail-toolkit does not forward `extra.signal` into the SDK, so without
+ * this a client that disconnects leaves its AgentMail HTTP request running to
+ * completion. That is invisible work: the connection is gone, nothing will read
+ * the response, and the retry the client just issued adds another one on top.
+ * Measured directly — after aborting a streamed tool call, the upstream socket
  * stayed open indefinitely while the server reported zero in flight.
  *
- * Idempotency: for a send route, attach the Idempotency-Key (caller's or the
- * content hash) unless the SDK already set one, and note whether the API
- * answered with a replay.
+ * The SDK takes a custom `fetch` at construction and we build a client per tool
+ * call, so injecting the signal here reaches every request the toolkit makes
+ * without the toolkit having to cooperate.
  */
-function fetchFor(signal: AbortSignal | undefined, send?: SendContext): typeof fetch | undefined {
-    if (!signal && !send) return undefined
-    return async (input, init) => {
-        const callerSignal = init?.signal ?? undefined
-        const combined = signal ? (callerSignal ? AbortSignal.any([callerSignal, signal]) : signal) : callerSignal
-        let headers = init?.headers
-        if (send) {
-            const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-            const hashed = sendIdempotencyKeyFor(url, init?.method, init?.body)
-            const key = hashed ? (send.idempotencyKey ?? hashed) : undefined
-            if (key && !headerPresent(headers, 'Idempotency-Key')) {
-                headers = withHeader(headers, 'Idempotency-Key', key)
-                send.keyUsed = key
-            }
-        }
-        const response = await fetch(input, { ...init, headers, signal: combined })
-        if (send && response.ok && response.headers.get('idempotent-replayed') === 'true') send.replayed = true
-        return response
-    }
-}
-
-/** Mark a successful send result as a replay in both the structured and text parts. */
-function markReplayed(result: Awaited<ReturnType<AgentMailToolkit['invoke']>>) {
-    const structuredContent = { ...(result.structuredContent ?? {}), replayed: true }
-    return {
-        ...result,
-        structuredContent,
-        content: [
-            { type: 'text' as const, text: JSON.stringify(structuredContent) },
-            { type: 'text' as const, text: REPLAYED_NOTE },
-        ],
+function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined {
+    if (!signal) return undefined
+    return (input, init) => {
+        const callerSignal = init?.signal
+        return fetch(input, {
+            ...init,
+            signal: callerSignal ? AbortSignal.any([callerSignal, signal]) : signal,
+        })
     }
 }
 
 /**
  * Build an AgentMailClient from a raw API key (legacy path).
  */
-function buildClientFromApiKey(apiKey: string, signal?: AbortSignal, send?: SendContext): AgentMailClient {
-    return buildClient(apiKey, signal, send)
+function buildClientFromApiKey(apiKey: string, signal?: AbortSignal): AgentMailClient {
+    return buildClient(apiKey, signal)
 }
 
 // ============================================================================
@@ -722,36 +636,7 @@ const STATIC_TOOLS = staticToolkit
     .getTools()
     .filter((tool) => tool.name !== 'auth_me')
     .map((tool) =>
-        SEND_TOOLS.has(tool.name)
-            ? {
-                  ...tool,
-                  inputSchema: {
-                      ...tool.inputSchema,
-                      idempotencyKey: z
-                          .string()
-                          .min(1)
-                          .max(256)
-                          .regex(IDEMPOTENCY_KEY_PATTERN, 'Use only A-Z a-z 0-9 - . _ ~')
-                          .optional()
-                          .describe(
-                              'Deduplication key for this send. By default it is a hash of the request, so an ' +
-                                  'identical send from this inbox within 24 hours returns the original message ' +
-                                  'instead of sending again. Pass a new value to send an identical email ' +
-                                  'deliberately; reuse one value across retries of the same send.'
-                          ),
-                  },
-                  outputSchema: {
-                      ...tool.outputSchema,
-                      replayed: z
-                          .boolean()
-                          .optional()
-                          .describe(
-                              'True when an identical send completed within the last 24 hours and the original ' +
-                                  'message was returned instead of sending again'
-                          ),
-                  },
-              }
-            : tool.name === 'get_thread'
+        tool.name === 'get_thread'
             ? {
                   ...tool,
                   description:
@@ -896,25 +781,15 @@ export function createMcpServer(auth: AuthSource): McpServer {
     for (const tool of STATIC_TOOLS) {
         server.registerTool(tool.name, tool, async (args, extra) => {
             try {
-                // idempotencyKey is ours, not the toolkit's: lift it out of the
-                // arguments before they reach the API request body.
-                let send: SendContext | undefined
-                if (SEND_TOOLS.has(tool.name)) {
-                    const { idempotencyKey, ...rest } = args as { idempotencyKey?: string }
-                    send = { idempotencyKey, replayed: false }
-                    args = rest
-                }
-
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
                     client = await buildClientFromClerkUser(
                         auth.clerkUserId,
                         auth.clerkOrgId,
-                        extra?.signal,
-                        send
+                        extra?.signal
                     )
                 } else if (auth.kind === 'apiKey') {
-                    client = buildClientFromApiKey(auth.apiKey, extra?.signal, send)
+                    client = buildClientFromApiKey(auth.apiKey, extra?.signal)
                 } else {
                     return noAuthMessage
                 }
@@ -927,8 +802,7 @@ export function createMcpServer(auth: AuthSource): McpServer {
                 // client it was built with, so hand the per-call client to
                 // invoke(), which the toolkit added for this multi-tenant
                 // case, instead of building a fresh toolkit per call.
-                const result = await staticToolkit.invoke(tool.name, client, args)
-                return send?.replayed && !result.isError ? markReplayed(result) : result
+                return staticToolkit.invoke(tool.name, client, args)
             } catch (error) {
                 return toolFailure(tool.name, error)
             }
