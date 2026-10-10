@@ -69,8 +69,7 @@ organization) and maps the answer to JSON-RPC. The API owns the catalog,
 authorization, callback verification, storage, delivery and revocation. Error
 mapping: `422` with `reason` → `-32015` CallbackEndpointError (`data.reason`);
 `400`/`404` → `-32602`; `401`/`403` → `-32600` with the API message;
-`429`/`5xx`/transport → `-32603` "temporarily unavailable". These methods need
-the API's MCP Events routes deployed first; until then they answer `-32603`.
+`429`/`5xx`/transport → `-32603` "temporarily unavailable".
 
 ## Clerk dependency
 
