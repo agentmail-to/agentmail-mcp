@@ -55,6 +55,22 @@ SDK clients parse results through their own schemas and drop keys they do not
 recognize, including unknown server capabilities. Test what the server sends by
 reading the HTTP response, not a client's parsed view.
 
+## MCP Events
+
+2026-07-28 clients see an `events` capability in `server/discover` and can call
+`events/list`, `events/subscribe` and `events/unsubscribe` (OpenAI's webhook
+subset of the MCP Events design sketch; ChatGPT uses it for "when mail arrives,
+do X" tasks). 2025-era clients see neither the capability nor the methods.
+
+The server only forwards: each method calls the AgentMail API's `/v0/mcp/*`
+route with the caller's own credential (the API key, or for OAuth the console
+JWT plus `principal: clerk_user:<id>`, since the console JWT names only the
+organization) and maps the answer to JSON-RPC. The API owns the catalog,
+authorization, callback verification, storage, delivery and revocation. Error
+mapping: `422` with `reason` → `-32015` CallbackEndpointError (`data.reason`);
+`400`/`404` → `-32602`; `401`/`403` → `-32600` with the API message;
+`429`/`5xx`/transport → `-32603` "temporarily unavailable".
+
 ## Clerk dependency
 
 Every OAuth tool call needs Clerk's Backend API (membership lookup, and for multi-org users the stored selection); `@clerk/backend` has no request timeout and ignores the request's abort signal. Three bounds keep a slow or rate-limited Clerk from occupying every admission slot:
