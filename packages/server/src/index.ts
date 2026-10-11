@@ -926,6 +926,12 @@ function registerEventMethods(server: McpServer, auth: AuthSource) {
     )
 }
 
+// How long a 2026-07-28 client may cache tools/list (2025-era responses never carry cache fields).
+// Public: the list is the same for every caller, since it depends only on deployment config. It
+// changes only when a deploy changes a tool, so for up to this long after one a client may still
+// offer the previous list; tool calls themselves are never cached.
+const TOOLS_LIST_CACHE_HINT = { ttlMs: 5 * 60 * 1000, cacheScope: 'public' } as const
+
 /**
  * One MCP server for one request. `events` is set for 2026-07-28 requests
  * only: MCP Events need that revision, and 2025-era clients must not see an
@@ -936,6 +942,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
         { name: 'AgentMail', version: '1.0.0' },
         {
             instructions: SERVER_INSTRUCTIONS,
+            cacheHints: { 'tools/list': TOOLS_LIST_CACHE_HINT },
             // `events` is not in the SDK's capability type; the SDK passes it through.
             ...(options.events && { capabilities: { events: {} } as Record<string, unknown> }),
         }

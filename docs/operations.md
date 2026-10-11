@@ -38,8 +38,9 @@ from the same server factory:
 
 - 2026-07-28 clients (`server/discover`, a per-request `_meta` envelope plus
   matching `MCP-Protocol-Version` and `Mcp-Method` headers, no `initialize`) on
-  the SDK's modern path. Header/body mismatches are the SDK's `-32020`.
-- 2025-era clients (`initialize` handshake, every client in production today)
+  the SDK's modern path. Header/body mismatches are the SDK's `-32020`. ChatGPT,
+  Claude Code and Codex negotiate this era (Manufact analytics, 2026-10-11).
+- 2025-era clients (`initialize` handshake: Cursor and most other clients)
   through the SDK's stateless legacy fallback, as before.
 
 Authentication is identical for both: `server/discover` without credentials
@@ -50,6 +51,14 @@ resolves reaches the server factory through the SDK's pass-through `AuthInfo`
 SDK v2 publishes tool schemas as JSON Schema draft 2020-12 (v1 published
 draft-07) and no longer adds `execution: { taskSupport: "forbidden" }` to every
 tool. Field names and types are unchanged.
+
+2026-07-28 results carry cache fields. `tools/list` sends `ttlMs: 300000`,
+`cacheScope: "public"` (`TOOLS_LIST_CACHE_HINT`): the list is the same for every
+caller and changes only with a deploy, so for up to five minutes after a deploy
+that changes a tool a client may still offer the previous list. Tool calls are
+never cached. Every other cacheable result keeps the SDK defaults (`ttlMs: 0`,
+`cacheScope: "private"`), and 2025-era responses carry no cache fields. Without
+the hint ChatGPT re-fetched `tools/list` about 80k times a day.
 
 SDK clients parse results through their own schemas and drop keys they do not
 recognize, including unknown server capabilities. Test what the server sends by
