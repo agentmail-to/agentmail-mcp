@@ -79,6 +79,41 @@ test('a 2025-era client still negotiates the legacy era and works', async (t) =>
     assert.ok(tools.length > 30)
 })
 
+/** The JSON-RPC message in a response, whether sent as JSON or as a one-event SSE stream. */
+async function messageOf(res) {
+    const text = await res.text()
+    if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) return JSON.parse(text)
+    return JSON.parse(
+        text
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .at(-1)
+            .slice('data:'.length)
+    )
+}
+
+test('2026-07-28 tools/list may be cached by any cache for five minutes; nothing else changes', async () => {
+    const { result: list } = await messageOf(await modern('tools/list'))
+    assert.equal(list.ttlMs, 5 * 60 * 1000)
+    assert.equal(list.cacheScope, 'public')
+
+    // server/discover keeps the SDK's conservative defaults.
+    const { result: discover } = await messageOf(await modern('server/discover'))
+    assert.equal(discover.ttlMs, 0)
+    assert.equal(discover.cacheScope, 'private')
+
+    // 2025-era responses never carry cache fields.
+    const legacy = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-api-key': 'am_dummy' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    })
+    const { result: legacyList } = await messageOf(legacy)
+    assert.ok(legacyList.tools.length > 30)
+    assert.equal('ttlMs' in legacyList, false)
+    assert.equal('cacheScope' in legacyList, false)
+})
+
 test('an unauthenticated server/discover gets the OAuth challenge, as initialize does', async () => {
     const res = await modern('server/discover', {})
     assert.equal(res.status, 401)
