@@ -69,7 +69,11 @@ reading the HTTP response, not a client's parsed view.
 2026-07-28 clients see an `events` capability in `server/discover` and can call
 `events/list`, `events/subscribe` and `events/unsubscribe` (OpenAI's webhook
 subset of the MCP Events design sketch; ChatGPT uses it for "when mail arrives,
-do X" tasks). 2025-era clients see neither the capability nor the methods.
+do X" tasks). Only 2026-07-28 clients are offered the capability, but the
+methods answer in both eras: ChatGPT discovers events over 2026-07-28 and then
+subscribes from a 2025-11-25 `initialize` session, calling `events/subscribe`
+without checking capabilities (Manufact request log, 2026-10-11). Serving them
+only on the modern path made every ChatGPT subscription fail with `-32601`.
 
 The server only forwards: each method calls the AgentMail API's `/v0/mcp/*`
 route with the caller's own credential (the API key, or for OAuth the console

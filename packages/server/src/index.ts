@@ -933,9 +933,12 @@ function registerEventMethods(server: McpServer, auth: AuthSource) {
 const TOOLS_LIST_CACHE_HINT = { ttlMs: 5 * 60 * 1000, cacheScope: 'public' } as const
 
 /**
- * One MCP server for one request. `events` is set for 2026-07-28 requests
- * only: MCP Events need that revision, and 2025-era clients must not see an
- * `events` capability they cannot use.
+ * One MCP server for one request. The `events` capability is advertised to
+ * 2026-07-28 requests only, so 2025-era clients are not offered something
+ * their protocol does not define. The events/* methods themselves are served
+ * in both eras: ChatGPT discovers events over 2026-07-28 but subscribes from a
+ * 2025-11-25 `initialize` session, calling events/subscribe without checking
+ * capabilities (Manufact request log, 2026-10-11).
  */
 export function createMcpServer(auth: AuthSource, options: { events?: boolean } = {}): McpServer {
     const server = new McpServer(
@@ -947,7 +950,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
             ...(options.events && { capabilities: { events: {} } as Record<string, unknown> }),
         }
     )
-    if (options.events) registerEventMethods(server, auth)
+    registerEventMethods(server, auth)
 
     const noAuthMessage = {
         content: [

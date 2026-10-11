@@ -180,8 +180,26 @@ test('events/unsubscribe forwards name, arguments and delivery target, and retur
     })
 })
 
-test('2025-era clients cannot call events/* at all', async () => {
-    const reply = await legacy('events/list')
-    assert.equal(reply.error.code, -32601)
-    assert.equal(apiRequests.length, 0)
+test('2025-era sessions are not offered events but may call events/*, as ChatGPT subscribes from one', async () => {
+    const initialize = await legacy('initialize', {
+        protocolVersion: '2025-11-25',
+        capabilities: {},
+        clientInfo: { name: 'openai-mcp', version: '1.0.0' },
+    })
+    assert.equal(initialize.result.capabilities.events, undefined)
+
+    const result = { id: 'sub_abc', refreshBefore: '2026-10-12T00:00:00.000Z', cursor: null, truncated: false }
+    apiReply = () => ({ status: 200, body: result })
+    const reply = await legacy('events/subscribe', subscribeParams)
+    assert.deepEqual(reply.result, result)
+    assert.equal(apiRequests[0].url, '/v0/mcp/events/subscribe')
+    assert.deepEqual(apiRequests[0].body, subscribeParams)
+
+    apiReply = () => ({ status: 204 })
+    const unsubscribe = await legacy('events/unsubscribe', {
+        name: 'message.received',
+        arguments: { inboxId: 'agent@example.com' },
+        delivery: { mode: 'webhook', url: 'https://chatgpt.example.com/cb' },
+    })
+    assert.deepEqual(unsubscribe.result, {})
 })
