@@ -645,13 +645,10 @@ const STATIC_TOOLS = staticToolkit
         if (tool.name !== 'create_draft' && tool.name !== 'update_draft') return tool
 
         // Both tools can schedule an irreversible send to external recipients;
-        // creating a draft can also fetch attachments from arbitrary URLs.
+        // creating a draft can also fetch attachments from arbitrary URLs. The
+        // descriptions say so since agentmail-toolkit 0.14.0; the hints stay here.
         return {
             ...tool,
-            description:
-                tool.name === 'create_draft'
-                    ? 'Create a draft email. Without sendAt, saves an unsent draft. With sendAt (ISO 8601 datetime), schedules automatic sending to the specified recipients without another tool call. Attachment URLs are fetched when creating the draft.'
-                    : 'Update a draft email. Use sendAt (ISO 8601 datetime) to schedule or reschedule automatic sending without another tool call. Changes to a scheduled draft affect the content and recipients of the email sent at that time.',
             annotations: {
                 ...tool.annotations,
                 destructiveHint: true,
@@ -674,14 +671,17 @@ const STATIC_TOOLS = staticToolkit
                           .positive()
                           .max(100)
                           .optional()
-                          .describe('Maximum messages to return'),
-                      pageToken: z.string().optional().describe('Page token for retrieving older messages'),
+                          .describe('Number of messages per page; the first page holds the newest'),
+                      pageToken: z
+                          .string()
+                          .optional()
+                          .describe("nextPageToken from the previous page's result, for older messages; omit for the newest"),
                   },
                   outputSchema: {
                       ...tool.outputSchema,
                       count: z.number().describe('Number of messages returned in this page'),
                       limit: z.number().optional().describe('Requested message limit'),
-                      nextPageToken: z.string().optional().describe('Page token for retrieving older messages'),
+                      nextPageToken: z.string().optional().describe('Pass as pageToken to get older messages; absent when there are none'),
                   },
               }
             : tool
@@ -1042,17 +1042,20 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 title: 'List organizations',
                 description:
                     'List the organizations you belong to and show which one is currently ' +
-                    'selected for AgentMail operations. Use `select_organization` to change it. ' +
+                    'selected for AgentMail operations: each with its ID, its name, and whether ' +
+                    'it is selected. Use `select_organization` to change it. ' +
                     'OAuth sessions only -- API-key requests return an error explaining that ' +
                     'organization selection does not apply to API-key authentication.',
                 outputSchema: {
-                    organizations: z.array(
-                        z.object({
-                            id: z.string(),
-                            name: z.string(),
-                            selected: z.boolean(),
-                        })
-                    ),
+                    organizations: z
+                        .array(
+                            z.object({
+                                id: z.string().describe('Organization ID; select_organization accepts it or the name'),
+                                name: z.string().describe('Display name of the organization'),
+                                selected: z.boolean().describe("Whether this session's AgentMail operations target it"),
+                            })
+                        )
+                        .describe('Every organization you belong to'),
                 },
                 annotations: {
                     title: 'List organizations',
@@ -1116,8 +1119,8 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                         .describe('Organization name or ID (see `list_organizations`)'),
                 },
                 outputSchema: {
-                    organizationId: z.string(),
-                    organizationName: z.string(),
+                    organizationId: z.string().describe('ID of the organization now selected'),
+                    organizationName: z.string().describe('Display name of the organization now selected'),
                 },
                 annotations: {
                     title: 'Select organization',

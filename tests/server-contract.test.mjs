@@ -41,6 +41,11 @@ const coreTools = [
   // for an agent that signed up without a human_email: until a human is
   // attached its inbox can receive but not send, and there is no code to verify.
   'agent_attach_human',
+  // get_labs and join_labs (agentmail-toolkit 0.13.0) are the public Labs API.
+  // join_labs stays on both auth paths: on OAuth (a console JWT) the API itself
+  // refuses the join with unrestricted_key_required (see apiKeyOnlyTools below).
+  'get_labs',
+  'join_labs',
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
