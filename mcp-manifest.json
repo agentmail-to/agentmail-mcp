@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:059da863de0e35fa397f643fd9c21e7c9a10d5c6628cfe108c5b672ce6ae0830",
+  "digest": "sha256:b7b4549b9b362d5787fdc4d7a7066eead82e0507443c92e63c25ce554686421e",
   "tools": [
     {
       "name": "list_inboxes",
@@ -1053,13 +1053,13 @@
             "description": "ID of thread"
           },
           "limit": {
-            "description": "Maximum messages to return",
+            "description": "Number of messages per page; the first page holds the newest",
             "type": "integer",
             "exclusiveMinimum": 0,
             "maximum": 100
           },
           "pageToken": {
-            "description": "Page token for retrieving older messages",
+            "description": "nextPageToken from the previous page's result, for older messages; omit for the newest",
             "type": "string"
           }
         },
@@ -1330,7 +1330,7 @@
             "type": "number"
           },
           "nextPageToken": {
-            "description": "Page token for retrieving older messages",
+            "description": "Pass as pageToken to get older messages; absent when there are none",
             "type": "string"
           }
         },
@@ -4798,7 +4798,7 @@
     {
       "name": "list_organizations",
       "title": "List organizations",
-      "description": "List the organizations you belong to and show which one is currently selected for AgentMail operations. Use `select_organization` to change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
+      "description": "List the organizations you belong to and show which one is currently selected for AgentMail operations: each with its ID, its name, and whether it is selected. Use `select_organization` to change it. OAuth sessions only -- API-key requests return an error explaining that organization selection does not apply to API-key authentication.",
       "inputSchema": {
         "type": "object",
         "properties": {}
@@ -4820,13 +4820,16 @@
               "type": "object",
               "properties": {
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Organization ID; select_organization accepts it or the name"
                 },
                 "name": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Display name of the organization"
                 },
                 "selected": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "Whether this session's AgentMail operations target it"
                 }
               },
               "required": [
@@ -4835,7 +4838,8 @@
                 "selected"
               ],
               "additionalProperties": false
-            }
+            },
+            "description": "Every organization you belong to"
           }
         },
         "required": [
@@ -4875,10 +4879,12 @@
         "type": "object",
         "properties": {
           "organizationId": {
-            "type": "string"
+            "type": "string",
+            "description": "ID of the organization now selected"
           },
           "organizationName": {
-            "type": "string"
+            "type": "string",
+            "description": "Display name of the organization now selected"
           }
         },
         "required": [
