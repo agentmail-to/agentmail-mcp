@@ -958,7 +958,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 type: 'text' as const,
                 text:
                     'Not authenticated. Sign in via OAuth, or provide an API key via ' +
-                    '?apiKey=YOUR_KEY query param, x-api-key header, or Authorization: Bearer am_... ' +
+                    'x-api-key header or Authorization: Bearer am_... ' +
                     'Get an API key at https://console.agentmail.to.',
             },
         ],
@@ -1368,6 +1368,9 @@ export async function fetchClerkAuthServerMetadata(
 }
 
 const authRouter: express.RequestHandler = async (req, res, next) => {
+    if (req.query.apiKey) {
+        console.warn('[telemetry] Legacy query-string API key auth used (sunset scheduled)')
+    }
     const apiKey = extractApiKey(req)
     if (apiKey) {
         req.authSource = { kind: 'apiKey', apiKey }
