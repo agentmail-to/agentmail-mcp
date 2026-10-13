@@ -645,13 +645,10 @@ const STATIC_TOOLS = staticToolkit
         if (tool.name !== 'create_draft' && tool.name !== 'update_draft') return tool
 
         // Both tools can schedule an irreversible send to external recipients;
-        // creating a draft can also fetch attachments from arbitrary URLs.
+        // creating a draft can also fetch attachments from arbitrary URLs. The
+        // descriptions say so since agentmail-toolkit 0.14.0; the hints stay here.
         return {
             ...tool,
-            description:
-                tool.name === 'create_draft'
-                    ? 'Create a draft email. Without sendAt, saves an unsent draft. With sendAt (ISO 8601 datetime), schedules automatic sending to the specified recipients without another tool call. Attachment URLs are fetched when creating the draft.'
-                    : 'Update a draft email. Use sendAt (ISO 8601 datetime) to schedule or reschedule automatic sending without another tool call. Changes to a scheduled draft affect the content and recipients of the email sent at that time.',
             annotations: {
                 ...tool.annotations,
                 destructiveHint: true,
