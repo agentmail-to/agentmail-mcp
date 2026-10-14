@@ -150,17 +150,20 @@ function getConsoleJwtKeyObject() {
 }
 
 /**
- * Sign a JWT the AgentMail backend will trust.
+ * Sign a JWT the AgentMail backend will trust. Exported for tests.
  *
  * @param organizationId  Either an AgentMail internal org id (normal request
  *                        path) OR a Clerk org id (bootstrap path for the
  *                        /v0/auth/internal-org lookup itself).
+ * @param clientId        The OAuth client the user authorized, on the normal
+ *                        request path only: the API records each organization's
+ *                        first MCP use from it, as `mcp_client_id`.
  */
-async function signConsoleJwt(organizationId: string): Promise<string> {
+export async function signConsoleJwt(organizationId: string, clientId?: string): Promise<string> {
     const privateKey = getConsoleJwtKeyObject()
     const now = Math.floor(Date.now() / 1000)
 
-    return await new SignJWT({ organizationId })
+    return await new SignJWT({ organizationId, ...(clientId && { mcp_client_id: clientId }) })
         .setProtectedHeader({ alg: 'ES256' })
         .setIssuer('agentmail-console')
         .setAudience('agentmail-api')
@@ -493,7 +496,11 @@ const internalOrgIdCache = new Map<string, string>()
  * Paths 3/4 keep multi-org working for any session whose token carries no
  * org_id, so the consent-screen picker is an improvement, not a dependency.
  */
-async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: string): Promise<string> {
+async function resolveClerkConsoleJwt(
+    clerkUserId: string,
+    selectedClerkOrgId?: string,
+    clientId?: string
+): Promise<string> {
     const memberships = await listUserOrgMemberships(clerkUserId)
     if (memberships.length === 0) {
         throw new Error(
@@ -543,7 +550,7 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
         internalOrgIdCache.set(chosenOrg.id, internalOrgId)
     }
 
-    return signConsoleJwt(internalOrgId)
+    return signConsoleJwt(internalOrgId, clientId)
 }
 
 /**
@@ -560,7 +567,7 @@ async function resolveClerkConsoleJwt(clerkUserId: string, selectedClerkOrgId?: 
  * reaches it. With no retries the error body comes straight back, and it
  * says when a retry can succeed; the MCP client decides whether to make one.
  */
-function buildClient(apiKey: string, signal?: AbortSignal): AgentMailClient {
+function buildClient(apiKey: string, signal?: AbortSignal, userAgent?: string): AgentMailClient {
     return new AgentMailClient({
         environment: AGENTMAIL_API_URL
             ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' }
@@ -568,16 +575,17 @@ function buildClient(apiKey: string, signal?: AbortSignal): AgentMailClient {
         apiKey,
         fetch: fetchBoundTo(signal),
         maxRetries: 0,
+        headers: relayHeaders(userAgent),
     })
 }
 
 /** Build an AgentMailClient backed by the resolved console JWT (see above). */
 async function buildClientFromClerkUser(
-    clerkUserId: string,
-    selectedClerkOrgId?: string,
+    auth: Extract<AuthSource, { kind: 'clerk' }>,
     signal?: AbortSignal
 ): Promise<AgentMailClient> {
-    return buildClient(await resolveClerkConsoleJwt(clerkUserId, selectedClerkOrgId), signal)
+    const jwt = await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId, auth.clerkClientId)
+    return buildClient(jwt, signal, auth.userAgent)
 }
 
 /**
@@ -608,8 +616,32 @@ function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined
 /**
  * Build an AgentMailClient from a raw API key (legacy path).
  */
-function buildClientFromApiKey(apiKey: string, signal?: AbortSignal): AgentMailClient {
-    return buildClient(apiKey, signal)
+function buildClientFromApiKey(auth: Extract<AuthSource, { kind: 'apiKey' }>, signal?: AbortSignal): AgentMailClient {
+    return buildClient(auth.apiKey, signal, auth.userAgent)
+}
+
+/**
+ * The header that relays the MCP client's own User-Agent to the AgentMail API,
+ * whichever credential the request holds: this server calls the API with its
+ * SDK's User-Agent, so without it the API cannot tell which client a request
+ * came from. The API records each organization's first MCP use from it (on an
+ * API key it is the only sign the request came through MCP) and logs it per
+ * request.
+ */
+export const MCP_USER_AGENT_HEADER = 'x-agentmail-mcp-user-agent'
+
+/**
+ * The inbound User-Agent as relayed. fetch refuses control characters and
+ * anything outside Latin-1 in a header value, so those are dropped, and it is
+ * capped at the 200 characters the API keeps. Exported for tests.
+ */
+export function relayedUserAgent(value: string | string[] | undefined): string | undefined {
+    const raw = Array.isArray(value) ? value[0] : value
+    return raw?.replace(/[^\x20-\x7e\xa0-\xff]/g, '').trim().slice(0, 200).trim() || undefined
+}
+
+function relayHeaders(userAgent: string | undefined): Record<string, string> | undefined {
+    return userAgent ? { [MCP_USER_AGENT_HEADER]: userAgent } : undefined
 }
 
 // ============================================================================
@@ -620,9 +652,11 @@ function buildClientFromApiKey(apiKey: string, signal?: AbortSignal): AgentMailC
 // only build it inside the tool callback when the tool is actually invoked.
 // ============================================================================
 
+// `clerkClientId` is the OAuth client the user authorized and `userAgent` the
+// MCP client's User-Agent (relayedUserAgent); both only travel to the API.
 type AuthSource =
-    | { kind: 'clerk'; clerkUserId: string; clerkOrgId?: string }
-    | { kind: 'apiKey'; apiKey: string }
+    | { kind: 'clerk'; clerkUserId: string; clerkOrgId?: string; clerkClientId?: string; userAgent?: string }
+    | { kind: 'apiKey'; apiKey: string; userAgent?: string }
     | { kind: 'none' }
 
 // Tool definitions are static metadata (name/description/schemas) — identical
@@ -827,7 +861,7 @@ async function eventsCredential(auth: AuthSource): Promise<{ bearer: string; pri
     if (auth.kind === 'apiKey') return { bearer: auth.apiKey }
     if (auth.kind === 'clerk')
         return {
-            bearer: await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId),
+            bearer: await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId, auth.clerkClientId),
             principal: `clerk_user:${auth.clerkUserId}`,
         }
     throw new ProtocolError(-32600, 'Not authenticated. Sign in via OAuth or provide an AgentMail API key.')
@@ -860,6 +894,7 @@ async function callEventsApi(
             headers: {
                 Authorization: `Bearer ${bearer}`,
                 ...(body !== undefined && { 'Content-Type': 'application/json' }),
+                ...relayHeaders(auth.kind === 'none' ? undefined : auth.userAgent),
             },
             ...(body !== undefined && { body: JSON.stringify(principal ? { ...body, principal } : body) }),
             signal,
@@ -1003,9 +1038,9 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
             try {
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
-                    client = await buildClientFromClerkUser(auth.clerkUserId, auth.clerkOrgId, signal)
+                    client = await buildClientFromClerkUser(auth, signal)
                 } else if (auth.kind === 'apiKey') {
-                    client = buildClientFromApiKey(auth.apiKey, signal)
+                    client = buildClientFromApiKey(auth, signal)
                 } else {
                     return noAuthMessage
                 }
@@ -1394,9 +1429,10 @@ export async function fetchClerkAuthServerMetadata(
 }
 
 const authRouter: express.RequestHandler = async (req, res, next) => {
+    const userAgent = relayedUserAgent(req.headers['user-agent'])
     const apiKey = extractApiKey(req)
     if (apiKey) {
-        req.authSource = { kind: 'apiKey', apiKey }
+        req.authSource = { kind: 'apiKey', apiKey, userAgent }
         return next()
     }
 
@@ -1449,6 +1485,8 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
                 kind: 'clerk',
                 clerkUserId: authInfo.extra.userId,
                 clerkOrgId: extractOrgIdFromClerkToken(token),
+                clerkClientId: authInfo.clientId,
+                userAgent,
             }
             return next()
         } catch (error) {
