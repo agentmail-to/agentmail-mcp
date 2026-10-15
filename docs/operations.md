@@ -157,7 +157,9 @@ the MCP request's abort signal is injected into the AgentMail SDK through a cust
 `fetch`. agentmail-toolkit does not forward the request's abort signal, so without that a
 client abort left the upstream HTTP request running to completion while the server
 reported zero in flight — letting timed-out clients rebuild unbounded background
-work behind a cap that looked healthy.
+work behind a cap that looked healthy. The toolkit's own fetches never go through
+the SDK (upload_file's presigned PUT to S3, get_attachment's download), so the
+same signal is also passed to `staticToolkit.invoke()`.
 
 Shedding is self-healing: it clears as soon as the next sample is under the
 limits, and logs only the transitions, never the individual sheds.
