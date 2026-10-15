@@ -550,7 +550,11 @@ async function resolveClerkConsoleJwt(
         internalOrgIdCache.set(chosenOrg.id, internalOrgId)
     }
 
-    return signConsoleJwt(internalOrgId, clientId)
+    // `clientId` is not sent for now. The API looked its name up from the HTTP authorizer, and that
+    // lookup timed out on every call (2026-10-15), adding about 450 ms to OAuth tool calls. It goes back
+    // once the API records the claim without a lookup in the authorizer's path.
+    void clientId
+    return signConsoleJwt(internalOrgId)
 }
 
 /**
