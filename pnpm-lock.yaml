@@ -44,11 +44,11 @@ importers:
         specifier: 2.3.1
         version: 2.3.1
       agentmail:
-        specifier: 0.5.44
-        version: 0.5.44
+        specifier: 0.5.46
+        version: 0.5.46
       agentmail-toolkit:
-        specifier: 0.14.0
-        version: 0.14.0(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.4.3))
+        specifier: 0.15.0
+        version: 0.15.0(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.4.3))
       cors:
         specifier: 2.8.5
         version: 2.8.5
@@ -185,8 +185,8 @@ packages:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
 
-  agentmail-toolkit@0.14.0:
-    resolution: {integrity: sha512-I3pqjXYYlq/71cWJ23KO2Qh14U3DIwoCNtvPrjzmCE4ICn5Z0PUmJppnKAuqJQZczNsorjHlt7ugwUg4UGUYdQ==}
+  agentmail-toolkit@0.15.0:
+    resolution: {integrity: sha512-APD3mLkVuruGmOEmO9KUFYn0oeuRHmXK1Oh9RlrrPj1H0DyMYiLlNnulAeI/Yq+lDzI7e/EHehFOOapd3mfxhA==}
     peerDependencies:
       '@mariozechner/pi-agent-core': ^0.50.1
       '@modelcontextprotocol/sdk': ^1.31.0
@@ -205,8 +205,8 @@ packages:
       langchain:
         optional: true
 
-  agentmail@0.5.44:
-    resolution: {integrity: sha512-+wgKqmRAZPJzNAUijM/Ew8qa1CVerF2sxnb1ndfnKRXuMOzIeKHYL5dJCp048hst99L2VGBI604LMZWQdm/S2Q==}
+  agentmail@0.5.46:
+    resolution: {integrity: sha512-N5tkOdSfo1mk67dfodCZGc9uAitf5JGn1gc2+klzQJBN73AjYQB2OI/2SepRHZRyANuNTBicYACKpLNjQEhwxw==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
       '@x402/fetch': ^2
@@ -801,9 +801,9 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  agentmail-toolkit@0.14.0(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
+  agentmail-toolkit@0.15.0(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.4.3)):
     dependencies:
-      agentmail: 0.5.44
+      agentmail: 0.5.46
       jszip: 3.10.1
       unpdf: 1.6.2
       zod: 4.4.3
@@ -815,7 +815,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  agentmail@0.5.44:
+  agentmail@0.5.46:
     dependencies:
       ws: 8.21.0
     transitivePeerDependencies:

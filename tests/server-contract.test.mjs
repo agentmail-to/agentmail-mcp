@@ -46,6 +46,13 @@ const coreTools = [
   // refuses the join with unrestricted_key_required (see apiKeyOnlyTools below).
   'get_labs',
   'join_labs',
+  // Agent Drive (agentmail-toolkit 0.15.0, AgentMail Labs). upload_file runs the
+  // API's create, PUT and complete in one call, since a model can't make the PUT;
+  // on OAuth (a console JWT) it works like any other caller with file_create.
+  'upload_file',
+  'list_files',
+  'get_file',
+  'delete_file',
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
