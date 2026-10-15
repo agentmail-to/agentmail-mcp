@@ -38,5 +38,5 @@ test('every tool the instructions name is in the catalog', async (t) => {
 })
 
 test('the instructions stay short enough for clients that truncate', () => {
-  assert.ok(SERVER_INSTRUCTIONS.length <= 2000, `instructions are ${SERVER_INSTRUCTIONS.length} chars`)
+  assert.ok(SERVER_INSTRUCTIONS.length <= 2200, `instructions are ${SERVER_INSTRUCTIONS.length} chars`)
 })

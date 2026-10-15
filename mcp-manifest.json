@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:9221769f3be29c0b6cdf3321f743301e01c9d701b9cdfe60162d568ef3baf739",
+  "digest": "sha256:9df77edaa6de397de189863fcdd9fa74690ba76305e1d6e1ca534906df3e778a",
   "tools": [
     {
       "name": "list_inboxes",
@@ -3957,7 +3957,7 @@
     {
       "name": "upload_file",
       "title": "Upload File",
-      "description": "Store a file at a path in an inbox's drive (Agent Drive) and get it back ready, with a download link when the credential may read files. Give text as content, or base64 with encoding base64 for any other bytes. Retrying the identical call returns the same file. A path holds one file: uploading something different to a path whose file is ready fails, so delete it first or pick another path. Files count against the organization's quota (1 GiB and 10,000 files by default); a refusal says which limit. Agent Drive is in AgentMail Labs (US only); an organization outside Labs gets a 403.",
+      "description": "Store a file at a path in an inbox's drive (Agent Drive) and get it back ready, with a download link when the credential may read files. Give text as content, or base64 with encoding base64 for any other bytes. Retrying the identical call returns the same file. A path holds one file: uploading something different to a path whose file is ready fails, so delete it first or pick another path. Files count against the organization's quota (1 GiB and 10,000 files by default); a refusal says which limit. Agent Drive is in AgentMail Labs (US only); an organization outside Labs gets a 403. Through this server a call is at most 10 MB, so a file sent as base64 can be about 7 MB at most.",
       "inputSchema": {
         "type": "object",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3989,7 +3989,9 @@
           },
           "expiresAt": {
             "description": "When the file deletes itself, as ISO 8601 with a timezone (e.g. 2026-11-01T00:00:00Z); in the future. It never expires when omitted",
-            "type": "string"
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
           }
         },
         "required": [
