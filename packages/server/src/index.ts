@@ -158,12 +158,15 @@ function getConsoleJwtKeyObject() {
  * @param clientId        The OAuth client the user authorized, on the normal
  *                        request path only: the API records each organization's
  *                        first MCP use from it, as `mcp_client_id`.
+ * @param clientName      The name that client registered under (oauthClientName),
+ *                        as `mcp_client_name`. Only beside its client id.
  */
-export async function signConsoleJwt(organizationId: string, clientId?: string): Promise<string> {
+export async function signConsoleJwt(organizationId: string, clientId?: string, clientName?: string): Promise<string> {
     const privateKey = getConsoleJwtKeyObject()
     const now = Math.floor(Date.now() / 1000)
+    const client = clientId ? { mcp_client_id: clientId, ...(clientName && { mcp_client_name: clientName }) } : {}
 
-    return await new SignJWT({ organizationId, ...(clientId && { mcp_client_id: clientId }) })
+    return await new SignJWT({ organizationId, ...client })
         .setProtectedHeader({ alg: 'ES256' })
         .setIssuer('agentmail-console')
         .setAudience('agentmail-api')
@@ -501,6 +504,8 @@ async function resolveClerkConsoleJwt(
     selectedClerkOrgId?: string,
     clientId?: string
 ): Promise<string> {
+    // Started first so it overlaps the membership and organization lookups.
+    const clientName = clientId ? oauthClientName(clientId) : undefined
     const memberships = await listUserOrgMemberships(clerkUserId)
     if (memberships.length === 0) {
         throw new Error(
@@ -550,11 +555,87 @@ async function resolveClerkConsoleJwt(
         internalOrgIdCache.set(chosenOrg.id, internalOrgId)
     }
 
-    // `clientId` is not sent for now. The API looked its name up from the HTTP authorizer, and that
-    // lookup timed out on every call (2026-10-15), adding about 450 ms to OAuth tool calls. It goes back
-    // once the API records the claim without a lookup in the authorizer's path.
-    void clientId
-    return signConsoleJwt(internalOrgId)
+    return signConsoleJwt(internalOrgId, clientId, await clientName)
+}
+
+// ============================================================================
+// OAuth client names
+//
+// The API records which MCP client each organization first used from the
+// console JWT a tool call signs: the client id and the name the client
+// registered under. The name is looked up here, not by the API. Its HTTP
+// authorizer, in front of every route, did that once, and from its VPC every
+// lookup hit its 500 ms deadline (2026-10-15). This server talks to Clerk on
+// every OAuth call anyway.
+//
+// A client id's name never changes, so it is cached for the process, and a
+// client Clerk has no application for is cached as null. A failed lookup is not
+// cached; the next call asks again. A call waits for a lookup that has not
+// answered only CLIENT_NAME_WAIT_MS, then signs without the name (the API records
+// nothing until a call carries one), and the lookup lands in the cache for the
+// next call.
+// ============================================================================
+const CLIENT_NAME_WAIT_MS = 300
+// The API's limit for the claim; longer names are cut by code point.
+const CLIENT_NAME_MAX_LENGTH = 200
+
+type ClientApplicationsPage = { data?: Array<{ clientId?: unknown; name?: unknown } | null> }
+type ClientNameDependencies = {
+    listApplications: (clientId: string) => Promise<ClientApplicationsPage>
+    cache: Map<string, string | null>
+    pending: Map<string, Promise<string | null>>
+    waitMs: number
+}
+const clientNameCache: ClientNameDependencies['cache'] = new Map()
+const clientNameLookups: ClientNameDependencies['pending'] = new Map()
+const defaultClientNameLookup: ClientNameDependencies = {
+    // `name_query` also matches an application's exact client_id; a prefix does not. @clerk/backend 3.11
+    // does not type `nameQuery` but sends it as `name_query` (tests/server-mcp-first-use.test.mjs).
+    listApplications: (clientId) =>
+        boundedClerkCall('client name lookup', () =>
+            clerkClient.oauthApplications.list({ nameQuery: clientId, limit: 10 } as Parameters<
+                typeof clerkClient.oauthApplications.list
+            >[0])
+        ),
+    cache: clientNameCache,
+    pending: clientNameLookups,
+    waitMs: CLIENT_NAME_WAIT_MS,
+}
+
+/** The name an OAuth client registered under, if known within the wait. Exported for tests. */
+export async function oauthClientName(
+    clientId: string,
+    deps: Partial<ClientNameDependencies> = {}
+): Promise<string | undefined> {
+    const { listApplications, cache, pending, waitMs } = { ...defaultClientNameLookup, ...deps }
+    if (cache.has(clientId)) return cache.get(clientId) ?? undefined
+    let lookup = pending.get(clientId)
+    if (!lookup) {
+        lookup = listApplications(clientId)
+            .then(
+                (page) => {
+                    const match = page.data?.find((application) => application?.clientId === clientId)
+                    const raw = typeof match?.name === 'string' ? match.name.trim() : ''
+                    const name = raw ? Array.from(raw).slice(0, CLIENT_NAME_MAX_LENGTH).join('') : null
+                    if (cache.size >= CLERK_CACHE_MAX_ENTRIES) cache.clear()
+                    cache.set(clientId, name)
+                    return name
+                },
+                () => null
+            )
+            .finally(() => pending.delete(clientId))
+        pending.set(clientId, lookup)
+    }
+    let timer: NodeJS.Timeout | undefined
+    try {
+        const waited = new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), waitMs)
+            timer.unref()
+        })
+        return (await Promise.race([lookup, waited])) ?? undefined
+    } finally {
+        clearTimeout(timer)
+    }
 }
 
 /**
