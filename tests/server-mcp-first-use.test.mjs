@@ -189,10 +189,18 @@ test('a call waits only briefly for a slow lookup, and the next call has the nam
     assert.equal(await oauthClientName('slow', deps), 'Claude Code (agentmail)')
 })
 
-test('a name is cut to the 200 code points the API accepts', async () => {
-    const { deps } = lookupFixture(async (clientId) => ({ data: [{ clientId, name: '😀'.repeat(250) }] }))
-    const name = await oauthClientName('long', deps)
-    assert.equal(Array.from(name).length, 200)
+test('a name goes on whole up to the claim’s 1,000 UTF-16 units, and is cut there without splitting a pair', async () => {
+    const names = {
+        // 107 code points, 207 units: past what the API stores, so it records product unknown, as for a signup origin.
+        stored_long: `Cursor ${'😀'.repeat(100)}`,
+        emoji: '😀'.repeat(600),
+        straddling: `${'x'.repeat(999)}😀`,
+    }
+    const { deps } = lookupFixture(async (clientId) => ({ data: [{ clientId, name: names[clientId] }] }))
+
+    assert.equal(await oauthClientName('stored_long', deps), names.stored_long)
+    assert.equal(await oauthClientName('emoji', deps), '😀'.repeat(500))
+    assert.equal(await oauthClientName('straddling', deps), 'x'.repeat(999))
 })
 
 test('the Clerk SDK this server uses sends nameQuery as name_query', async () => {

@@ -576,8 +576,11 @@ async function resolveClerkConsoleJwt(
 // next call.
 // ============================================================================
 const CLIENT_NAME_WAIT_MS = 300
-// The API's limit for the claim; longer names are cut by code point.
-const CLIENT_NAME_MAX_LENGTH = 200
+// The API's limit for the claim, in UTF-16 units as it counts them. The name goes on whole up to
+// it: the API stores at most 200 and records a longer name as product `unknown`, as it does for a
+// signup origin, so cutting shorter here would label the same client differently in the two records.
+// Past this a name is cut, never splitting a surrogate pair, and still lands in that fallback.
+const CLIENT_NAME_MAX_LENGTH = 1_000
 
 type ClientApplicationsPage = { data?: Array<{ clientId?: unknown; name?: unknown } | null> }
 type ClientNameDependencies = {
@@ -616,7 +619,8 @@ export async function oauthClientName(
                 (page) => {
                     const match = page.data?.find((application) => application?.clientId === clientId)
                     const raw = typeof match?.name === 'string' ? match.name.trim() : ''
-                    const name = raw ? Array.from(raw).slice(0, CLIENT_NAME_MAX_LENGTH).join('') : null
+                    const cut = raw.slice(0, CLIENT_NAME_MAX_LENGTH)
+                    const name = (/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut) || null
                     if (cache.size >= CLERK_CACHE_MAX_ENTRIES) cache.clear()
                     cache.set(clientId, name)
                     return name
