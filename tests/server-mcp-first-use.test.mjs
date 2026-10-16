@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
 import { generateKeyPairSync } from 'node:crypto'
+import { createRequire } from 'node:module'
 
 // What the AgentMail API needs to record each organization's first MCP use: the OAuth client the
 // user authorized, as `mcp_client_id` on the console JWT a tool call signs (never on the bootstrap
@@ -23,7 +24,9 @@ const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
 process.env.CONSOLE_JWT_PRIVATE_KEY = privateKey.export({ type: 'pkcs8', format: 'pem' })
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.AGENTMAIL_API_URL = `http://127.0.0.1:${api.address().port}`
-const { app, signConsoleJwt, relayedUserAgent, MCP_USER_AGENT_HEADER } = await import('../packages/server/build/index.js')
+const { app, signConsoleJwt, relayedUserAgent, oauthClientName, MCP_USER_AGENT_HEADER } = await import(
+    '../packages/server/build/index.js'
+)
 
 const server = app.listen(0)
 await new Promise((resolve) => server.once('listening', resolve))
@@ -39,10 +42,18 @@ test.beforeEach(() => {
 
 const payload = (jwt) => JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString())
 
-test('a tool call’s console JWT names the OAuth client; the bootstrap JWT does not', async () => {
-    const toolCall = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr'))
+test('a tool call’s console JWT names the OAuth client and its name; the bootstrap JWT does not', async () => {
+    const toolCall = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor'))
     assert.equal(toolCall.organizationId, 'internal_org')
     assert.equal(toolCall.mcp_client_id, 'Y0enFZG3FF8IFxZr')
+    assert.equal(toolCall.mcp_client_name, 'Cursor')
+
+    // Before the name lookup answers, the client id goes alone.
+    const unnamed = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr'))
+    assert.equal(unnamed.mcp_client_id, 'Y0enFZG3FF8IFxZr')
+    assert.equal('mcp_client_name' in unnamed, false)
+    // A name never travels without its client id.
+    assert.equal('mcp_client_name' in payload(await signConsoleJwt('internal_org', undefined, 'Cursor')), false)
 
     const bootstrap = payload(await signConsoleJwt('org_clerk'))
     assert.equal(bootstrap.organizationId, 'org_clerk')
@@ -114,3 +125,99 @@ test('an events call relays it too', async () => {
     assert.ok(events, JSON.stringify(apiRequests.map((r) => r.url)))
     assert.equal(events.headers[MCP_USER_AGENT_HEADER], 'chatgpt-connector/1.0')
 })
+
+// One lookup per client id per process, through stubbed dependencies.
+function lookupFixture(answer) {
+    const calls = []
+    return {
+        calls,
+        deps: {
+            listApplications: (clientId) => {
+                calls.push(clientId)
+                return answer(clientId)
+            },
+            cache: new Map(),
+            pending: new Map(),
+            waitMs: 50,
+        },
+    }
+}
+
+test('a client’s name is looked up once per process, and a client Clerk has none for is remembered too', async () => {
+    const { calls, deps } = lookupFixture(async (clientId) => ({
+        data: [
+            { clientId: `${clientId}x`, name: 'Prefix match' },
+            ...(clientId === 'known' ? [{ clientId, name: '  Cursor  ' }] : []),
+        ],
+    }))
+
+    assert.equal(await oauthClientName('known', deps), 'Cursor')
+    assert.equal(await oauthClientName('known', deps), 'Cursor')
+    assert.equal(await oauthClientName('unknown', deps), undefined)
+    assert.equal(await oauthClientName('unknown', deps), undefined)
+    assert.deepEqual(calls, ['known', 'unknown'])
+})
+
+test('a failed lookup is asked again, and concurrent calls share one lookup', async () => {
+    let fail = true
+    const { calls, deps } = lookupFixture(async (clientId) => {
+        if (fail) throw new Error('clerk 503')
+        return { data: [{ clientId, name: 'Codex' }] }
+    })
+
+    assert.equal(await oauthClientName('flaky', deps), undefined)
+    fail = false
+    const [first, second] = await Promise.all([oauthClientName('flaky', deps), oauthClientName('flaky', deps)])
+    assert.deepEqual([first, second], ['Codex', 'Codex'])
+    assert.deepEqual(calls, ['flaky', 'flaky'])
+})
+
+test('a call waits only briefly for a slow lookup, and the next call has the name', async () => {
+    let release
+    const { deps } = lookupFixture(
+        (clientId) =>
+            new Promise((resolve) => {
+                release = () => resolve({ data: [{ clientId, name: 'Claude Code (agentmail)' }] })
+            })
+    )
+
+    const started = Date.now()
+    assert.equal(await oauthClientName('slow', deps), undefined)
+    assert.ok(Date.now() - started < 1_000)
+    release()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(await oauthClientName('slow', deps), 'Claude Code (agentmail)')
+})
+
+test('a name is cut to the 200 code points the API accepts', async () => {
+    const { deps } = lookupFixture(async (clientId) => ({ data: [{ clientId, name: '😀'.repeat(250) }] }))
+    const name = await oauthClientName('long', deps)
+    assert.equal(Array.from(name).length, 200)
+})
+
+test('the Clerk SDK this server uses sends nameQuery as name_query', async () => {
+    let seen
+    const realFetch = globalThis.fetch
+    // Stubbed before the SDK loads: it binds fetch when it is imported.
+    globalThis.fetch = async (url) => {
+        seen = new URL(String(url))
+        return new Response(JSON.stringify({ data: [{ object: 'oauth_application', id: 'oa_1', client_id: 'C2nehWQ9vHAeRJc1', name: 'Cursor' }], total_count: 1 }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        })
+    }
+    try {
+        const fromExpress = createRequire(createRequire(import.meta.url).resolve('../packages/server/node_modules/@clerk/express'))
+        const { createClerkClient } = await import(fromExpress.resolve('@clerk/backend'))
+        const page = await createClerkClient({ secretKey: 'sk_test_contract' }).oauthApplications.list({
+            nameQuery: 'C2nehWQ9vHAeRJc1',
+            limit: 10,
+        })
+        assert.equal(seen.pathname, '/v1/oauth_applications')
+        assert.equal(seen.searchParams.get('name_query'), 'C2nehWQ9vHAeRJc1')
+        assert.deepEqual({ clientId: page.data[0].clientId, name: page.data[0].name }, { clientId: 'C2nehWQ9vHAeRJc1', name: 'Cursor' })
+    } finally {
+        globalThis.fetch = realFetch
+    }
+})
+
