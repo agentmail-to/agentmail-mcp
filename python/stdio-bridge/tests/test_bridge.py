@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import anyio
 import httpx
 import pytest
+from unittest.mock import AsyncMock
 from mcp import ClientSession, types
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
@@ -127,6 +128,26 @@ async def test_remote_tool_errors_and_list_change_are_forwarded():
         and isinstance(message.root, types.ToolListChangedNotification)
         for message in notifications
     )
+
+
+@pytest.mark.anyio
+async def test_event_envelope_contains_references_only():
+    bridge = Bridge()
+    bridge.local_session = type("Session", (), {"send_notification": AsyncMock()})()
+    bridge.event_subscriptions[("message.received", ("agent@example.com",))] = 1
+    message = type(
+        "Message",
+        (),
+        {"inbox_id": "agent@example.com", "message_id": "msg_123", "text": "must never be forwarded"},
+    )()
+    event = type("Event", (), {"event_type": "message.received", "event_id": "evt_123", "message": message})()
+
+    await bridge.forward_event(event)
+
+    notification = bridge.local_session.send_notification.await_args.args[0]
+    assert notification.method == "notifications/event-bridge/event"
+    assert notification.params["data"] == {"inboxId": "agent@example.com", "messageId": "msg_123"}
+    assert "text" not in notification.params["data"]
 
 
 @pytest.mark.anyio

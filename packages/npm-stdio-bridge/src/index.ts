@@ -4,6 +4,7 @@ import { open, realpath, stat } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { AgentMailClient } from 'agentmail'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -17,6 +18,7 @@ import {
     ToolListChangedNotificationSchema,
     type Progress,
 } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 
 const VERSION = '1.1.0'
 const ENDPOINT = new URL('https://mcp.agentmail.to/mcp')
@@ -25,6 +27,114 @@ const USER_AGENT = 'agentmail-mcp-node/1.1.0'
 const MAX_LOCAL_ATTACHMENT_BYTES = 6 * 1024 * 1024
 
 type JsonObject = Record<string, unknown>
+
+const EVENT_NOTIFICATION_METHOD = 'notifications/event-bridge/event'
+const EventListRequestSchema = z.object({ method: z.literal('events/list'), params: z.object({}).optional() })
+const EventSubscribeRequestSchema = z.object({
+    method: z.literal('events/subscribe'),
+    params: z.object({
+        name: z.string(),
+        arguments: z.record(z.string(), z.unknown()),
+        delivery: z.object({ mode: z.literal('mcp') }),
+    }),
+})
+const EventUnsubscribeRequestSchema = z.object({
+    method: z.literal('events/unsubscribe'),
+    params: z.object({
+        name: z.string(),
+        arguments: z.record(z.string(), z.unknown()),
+        delivery: z.object({ mode: z.literal('mcp') }),
+    }),
+})
+
+type LocalSubscription = { name: string; inboxId?: string }
+
+export class LocalEventBridge {
+    private readonly subscriptions = new Map<string, LocalSubscription>()
+    private socket: Awaited<ReturnType<AgentMailClient['websockets']['connect']>> | undefined
+
+    constructor(
+        private readonly apiKey: string,
+        private readonly send: (params: JsonObject) => Promise<void>,
+    ) {}
+
+    async subscribe(name: string, args: JsonObject) {
+        const inboxId = args.inboxId
+        if (inboxId !== undefined && (typeof inboxId !== 'string' || !inboxId)) {
+            throw new McpError(ErrorCode.InvalidParams, 'arguments.inboxId must be a non-empty string')
+        }
+        this.subscriptions.set(`${name}:${inboxId ?? '*'}`, { name, inboxId: inboxId as string | undefined })
+        // The SDK retains the filters passed to sendSubscribe after reconnect.
+        // Recreate it when the subscription set changes so it never keeps a
+        // stale, narrower filter from the first action.
+        this.socket?.close()
+        this.socket = undefined
+        await this.ensureConnected()
+        return { id: `local:${name}:${inboxId}` }
+    }
+
+    async unsubscribe(name: string, args: JsonObject) {
+        const inboxId = args.inboxId
+        if (inboxId !== undefined && typeof inboxId !== 'string') {
+            throw new McpError(ErrorCode.InvalidParams, 'arguments.inboxId must be a string')
+        }
+        this.subscriptions.delete(`${name}:${inboxId ?? '*'}`)
+        this.socket?.close()
+        this.socket = undefined
+        if (this.subscriptions.size > 0) await this.ensureConnected()
+        return {}
+    }
+
+    async close() {
+        this.socket?.close()
+        this.socket = undefined
+    }
+
+    private async ensureConnected() {
+        if (this.socket) return
+        const client = new AgentMailClient({ apiKey: this.apiKey })
+        this.socket = await client.websockets.connect({ autoReconnect: true })
+        this.socket.on('message', (event) => void this.forward(event as unknown as JsonObject))
+        this.socket.on('error', (error) => console.error(`AgentMail MCP: event WebSocket error: ${error.message}`))
+        this.socket.sendSubscribe({
+            type: 'subscribe',
+            eventTypes: [...new Set([...this.subscriptions.values()].map((item) => item.name))] as never,
+            inboxIds: (() => {
+                const inboxIds = [
+                    ...new Set(
+                        [...this.subscriptions.values()]
+                            .map((item) => item.inboxId)
+                            .filter((inboxId): inboxId is string => typeof inboxId === 'string'),
+                    ),
+                ]
+                return inboxIds.length ? inboxIds : undefined
+            })(),
+        })
+    }
+
+    private async forward(event: JsonObject) {
+        const message = event.message as JsonObject | undefined
+        const eventName = event.eventType
+        const eventId = event.eventId
+        const inboxId = message?.inboxId
+        const messageId = message?.messageId
+        if (
+            typeof eventName !== 'string' ||
+            typeof eventId !== 'string' ||
+            typeof inboxId !== 'string' ||
+            typeof messageId !== 'string' ||
+            (!this.subscriptions.has(`${eventName}:${inboxId}`) && !this.subscriptions.has(`${eventName}:*`))
+        )
+            return
+        await this.send({
+            eventId,
+            source: 'agentmail',
+            event: eventName,
+            timestamp: new Date().toISOString(),
+            data: { inboxId, messageId },
+        })
+    }
+}
 
 export type ValidatedFileRoot = {
     path: string
@@ -307,6 +417,7 @@ export async function startBridge(
     localTransport: Transport,
     tools?: Set<string>,
     fileRoot?: string,
+    apiKey?: string,
 ) {
     const canonicalFileRoot = fileRoot ? await validateFileRoot(fileRoot) : undefined
     const server = new Server(
@@ -314,6 +425,9 @@ export async function startBridge(
         { capabilities: { tools: { listChanged: true } } },
     )
     const client = new Client({ name: 'agentmail-mcp-node', version: VERSION })
+    const events = apiKey
+        ? new LocalEventBridge(apiKey, (params) => server.notification({ method: EVENT_NOTIFICATION_METHOD, params } as never))
+        : undefined
 
     client.setNotificationHandler(ToolListChangedNotificationSchema, () => server.sendToolListChanged())
     server.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
@@ -345,10 +459,31 @@ export async function startBridge(
             progressOptions(request.params._meta?.progressToken, extra.signal, extra.sendNotification),
         )
     })
+    ;(server as any).setRequestHandler(EventListRequestSchema, async () => ({
+        events: [
+            {
+                name: 'message.received',
+                description: 'An email arrived.',
+                delivery: ['mcp'],
+                inputSchema: { type: 'object', properties: { inboxId: { type: 'string' } }, required: ['inboxId'] },
+            },
+        ],
+    }))
+    ;(server as any).setRequestHandler(EventSubscribeRequestSchema, async (request: z.infer<typeof EventSubscribeRequestSchema>) => {
+        if (!events) throw new McpError(ErrorCode.InvalidRequest, 'AGENTMAIL_API_KEY is required')
+        return events.subscribe(request.params.name, request.params.arguments)
+    })
+    ;(server as any).setRequestHandler(EventUnsubscribeRequestSchema, async (request: z.infer<typeof EventUnsubscribeRequestSchema>) => {
+        if (!events) throw new McpError(ErrorCode.InvalidRequest, 'AGENTMAIL_API_KEY is required')
+        return events.unsubscribe(request.params.name, request.params.arguments)
+    })
 
     server.onerror = (error) => console.error(`AgentMail MCP: stdio error: ${error.message}`)
     client.onerror = (error) => console.error(`AgentMail MCP: hosted error: ${error.message}`)
-    server.onclose = () => void client.close()
+    server.onclose = () => {
+        void events?.close()
+        void client.close()
+    }
     client.onclose = () => void server.close()
     await client.connect(remoteTransport)
     await server.connect(localTransport)
@@ -368,7 +503,7 @@ async function main() {
         },
     })
     const args = process.argv.slice(2)
-    await startBridge(remote, new StdioServerTransport(), parseTools(args), parseFileRoot(args))
+    await startBridge(remote, new StdioServerTransport(), parseTools(args), parseFileRoot(args), apiKey)
 }
 
 const entryUrl = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href

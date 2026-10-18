@@ -1,4 +1,6 @@
 import argparse
+import asyncio
+from datetime import datetime, timezone
 import os
 import sys
 from importlib.metadata import version
@@ -11,9 +13,19 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
+from pydantic import BaseModel
+
+from agentmail import AsyncAgentMail, Subscribe
 
 ENDPOINT = "https://mcp.agentmail.to/mcp"
 VERSION = version("agentmail-mcp")
+
+
+class EventBridgeNotification(BaseModel):
+    """Wire model for the local extension notification."""
+
+    method: str = "notifications/event-bridge/event"
+    params: dict[str, Any]
 
 
 class Bridge:
@@ -21,6 +33,9 @@ class Bridge:
         self.selected_tools = selected_tools
         self.remote: ClientSession | None = None
         self.local_session: Any = None
+        self.api_key: str | None = None
+        self.event_subscriptions: dict[tuple[str, tuple[str, ...]], int] = {}
+        self.event_task: asyncio.Task[None] | None = None
         self.server = Server("agentmail-mcp", VERSION)
         self.server.list_tools()(self.list_tools)
         self.server.call_tool()(self.call_tool)
@@ -41,6 +56,10 @@ class Bridge:
         return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+        if name == "_event_bridge_subscribe":
+            return await self.subscribe_events(arguments)
+        if name == "_event_bridge_unsubscribe":
+            return await self.unsubscribe_events(arguments)
         if self.selected_tools is not None and name not in self.selected_tools:
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=f"Tool '{name}' is not enabled")],
@@ -62,6 +81,97 @@ class Bridge:
             arguments,
             progress_callback=progress if progress_token is not None else None,
             meta=meta,
+        )
+
+    async def subscribe_events(self, arguments: dict[str, Any]) -> types.CallToolResult:
+        event = arguments.get("event")
+        inbox_id = arguments.get("inboxId")
+        if not isinstance(event, str) or (inbox_id is not None and not isinstance(inbox_id, str)):
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="event is required and inboxId must be a string")], isError=True
+            )
+        key = (event, (inbox_id,) if inbox_id else ())
+        self.event_subscriptions[key] = self.event_subscriptions.get(key, 0) + 1
+        if self.event_task is None:
+            self.event_task = asyncio.create_task(self.listen_for_events())
+        return types.CallToolResult(content=[types.TextContent(type="text", text="subscribed")])
+
+    async def unsubscribe_events(self, arguments: dict[str, Any]) -> types.CallToolResult:
+        event = arguments.get("event")
+        inbox_id = arguments.get("inboxId")
+        key = (event, (inbox_id,) if isinstance(inbox_id, str) else ())
+        if key in self.event_subscriptions:
+            self.event_subscriptions[key] -= 1
+            if self.event_subscriptions[key] <= 0:
+                self.event_subscriptions.pop(key)
+        if not self.event_subscriptions and self.event_task is not None:
+            self.event_task.cancel()
+            self.event_task = None
+        return types.CallToolResult(content=[types.TextContent(type="text", text="unsubscribed")])
+
+    async def listen_for_events(self) -> None:
+        """Maintain an outbound AgentMail WebSocket and emit reference-only events."""
+        assert self.api_key is not None
+        while self.event_subscriptions:
+            try:
+                client = AsyncAgentMail(api_key=self.api_key)
+                async with client.websockets.connect() as socket:
+                    event_types = sorted({event for event, _ in self.event_subscriptions})
+                    inbox_ids = sorted({inbox for _, inboxes in self.event_subscriptions for inbox in inboxes})
+                    # AgentMail's WebSocket endpoint requires an inbox or pod
+                    # filter.  An omitted local filter means every inbox the
+                    # configured API key can list, not a cloud-to-local wildcard.
+                    if not inbox_ids:
+                        inboxes = await client.inboxes.list(limit=100)
+                        inbox_ids = sorted(inbox.inbox_id for inbox in inboxes.inboxes)
+                    if not inbox_ids:
+                        raise RuntimeError("No AgentMail inboxes are available for the event subscription")
+                    await socket.send_subscribe(Subscribe(event_types=event_types, inbox_ids=inbox_ids))
+                    print(
+                        f"agentmail-mcp: event WebSocket subscribed to {', '.join(event_types)}"
+                        + f" for {', '.join(inbox_ids)}",
+                        file=sys.stderr,
+                    )
+                    async for event in socket:
+                        event_detail = (
+                            f"{getattr(event, 'name', '')}: {getattr(event, 'message', '')}"
+                            if type(event).__name__ == "Error"
+                            else None
+                        )
+                        print(
+                            "agentmail-mcp: event WebSocket received "
+                            f"{getattr(event, 'event_type', type(event).__name__)}"
+                            + (f": {event_detail}" if event_detail else ""),
+                            file=sys.stderr,
+                        )
+                        await self.forward_event(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                print("agentmail-mcp: event WebSocket failed; reconnecting", file=sys.stderr)
+                await asyncio.sleep(5)
+
+    async def forward_event(self, event: Any) -> None:
+        if self.local_session is None:
+            return
+        event_name = getattr(event, "event_type", None)
+        message = getattr(event, "message", None)
+        inbox_id = getattr(message, "inbox_id", None)
+        message_id = getattr(message, "message_id", None)
+        if not isinstance(event_name, str) or not isinstance(inbox_id, str) or not isinstance(message_id, str):
+            return
+        if (event_name, (inbox_id,)) not in self.event_subscriptions and (event_name, ()) not in self.event_subscriptions:
+            return
+        await self.local_session.send_notification(  # type: ignore[arg-type]
+            EventBridgeNotification(
+                params={
+                    "eventId": getattr(event, "event_id", message_id),
+                    "source": "agentmail",
+                    "event": event_name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "data": {"inboxId": inbox_id, "messageId": message_id},
+                }
+            )
         )
 
     async def remote_message(self, message: Any) -> None:
@@ -96,6 +206,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[str, frozenset[str] | Non
 
 async def run(api_key: str, selected_tools: frozenset[str] | None = None) -> None:
     bridge = Bridge(selected_tools)
+    bridge.api_key = api_key
     headers = {
         "x-api-key": api_key,
         "User-Agent": f"agentmail-mcp-python/{VERSION}",
