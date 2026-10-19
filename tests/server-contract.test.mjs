@@ -53,6 +53,18 @@ const coreTools = [
   'list_files',
   'get_file',
   'delete_file',
+  // Calendar (agentmail-toolkit 0.16.0), out of Labs for every US production
+  // organization since Oct 19 2026. On OAuth (a console JWT) the calendar
+  // routes run behind the same authorizer as mail, and an unrestricted
+  // credential holds every calendar permission.
+  'get_agenda',
+  'get_event',
+  'create_event',
+  'update_event',
+  'delete_event',
+  'respond_to_invitation',
+  'get_calendar',
+  'update_calendar',
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
