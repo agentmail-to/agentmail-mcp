@@ -9,7 +9,7 @@ description = "Stdio compatibility bridge for the hosted AgentMail MCP server"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "AgentMail", email = "support@agentmail.to" }]
+authors = [{ name = "AgentMail", email = "support@agentmail.cc" }]
 dependencies = [
   "httpx==0.28.1",
   "mcp==1.28.1",
