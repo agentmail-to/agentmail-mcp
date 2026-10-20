@@ -1033,6 +1033,14 @@ const TOOLS_LIST_CACHE_HINT = { ttlMs: 5 * 60 * 1000, cacheScope: 'public' } as 
  * in both eras: ChatGPT discovers events over 2026-07-28 but subscribes from a
  * 2025-11-25 `initialize` session, calling events/subscribe without checking
  * capabilities (Manufact request log, 2026-10-11).
+ *
+ * `tools.listChanged` is false in both eras. A server built per request never
+ * sends tools/list_changed: the list changes only with a deploy, and clients see
+ * it on their next tools/list. The SDK defaults the bit to true, which made
+ * Claude Code hold a subscriptions/listen stream open for nothing until
+ * requestTimeout cut it at 30 s, about 550k a day, each in an admission slot
+ * (Manufact, 2026-10-13..19). With it false, SDK clients open no listen stream,
+ * and one opened anyway is acknowledged and ended at once.
  */
 export function createMcpServer(auth: AuthSource, options: { events?: boolean } = {}): McpServer {
     const server = new McpServer(
@@ -1040,8 +1048,11 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
         {
             instructions: SERVER_INSTRUCTIONS,
             cacheHints: { 'tools/list': TOOLS_LIST_CACHE_HINT },
-            // `events` is not in the SDK's capability type; the SDK passes it through.
-            ...(options.events && { capabilities: { events: {} } as Record<string, unknown> }),
+            capabilities: {
+                tools: { listChanged: false },
+                // `events` is not in the SDK's capability type; the SDK passes it through.
+                ...(options.events && ({ events: {} } as Record<string, unknown>)),
+            },
         }
     )
     registerEventMethods(server, auth)

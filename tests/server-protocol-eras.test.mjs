@@ -15,8 +15,8 @@ const { port } = server.address()
 const url = new URL(`http://127.0.0.1:${port}/mcp`)
 test.after(() => server.close())
 
-async function connect(t, mode) {
-    const client = new Client({ name: 'eras-test', version: '1.0.0' }, { versionNegotiation: { mode } })
+async function connect(t, mode, options = {}) {
+    const client = new Client({ name: 'eras-test', version: '1.0.0' }, { versionNegotiation: { mode }, ...options })
     t.after(() => client.close().catch(() => {}))
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { 'x-api-key': 'am_dummy' } } }))
     return client
@@ -31,7 +31,7 @@ const MODERN_META = {
 }
 
 /** A raw 2026-07-28 request, so assertions see the wire and not a client's parsed view. */
-const modern = (method, extraHeaders = { 'x-api-key': 'am_dummy' }) =>
+const modern = (method, extraHeaders = { 'x-api-key': 'am_dummy' }, params = {}, init = {}) =>
     fetch(url, {
         method: 'POST',
         headers: {
@@ -41,7 +41,8 @@ const modern = (method, extraHeaders = { 'x-api-key': 'am_dummy' }) =>
             'mcp-method': method,
             ...extraHeaders,
         },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 'eras', method, params: { _meta: MODERN_META } }),
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'eras', method, params: { ...params, _meta: MODERN_META } }),
+        ...init,
     })
 
 test('a 2026-07-28 client negotiates the modern era over server/discover', async (t) => {
@@ -118,4 +119,48 @@ test('an unauthenticated server/discover gets the OAuth challenge, as initialize
     const res = await modern('server/discover', {})
     assert.equal(res.status, 401)
     assert.match(res.headers.get('www-authenticate') ?? '', /resource_metadata=/)
+})
+
+// This stateless server never sends tools/list_changed: the tool list changes only with a
+// deploy, and clients see it on their next tools/list. Advertising listChanged made Claude Code
+// open subscriptions/listen streams that sat idle in an admission slot until requestTimeout cut
+// them at 30 s, about 550k a day (Manufact, 2026-10-13..19).
+test('a 2026-07-28 client that watches the tool list opens no listen stream', async (t) => {
+    const client = await connect(t, { pin: '2026-07-28' }, { listChanged: { tools: { onChanged: () => {} } } })
+    assert.equal(client.getProtocolEra(), 'modern')
+    assert.equal(client.autoOpenedSubscription, undefined)
+})
+
+test('neither era advertises tools.listChanged', async () => {
+    const { result: discover } = await messageOf(await modern('server/discover'))
+    assert.equal(discover.capabilities.tools.listChanged, false)
+
+    const legacy = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-api-key': 'am_dummy' },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'eras-test', version: '1' } },
+        }),
+    })
+    const { result: initialize } = await messageOf(legacy)
+    assert.equal(initialize.capabilities.tools.listChanged, false)
+})
+
+// For a client that listens anyway: nothing it asks for can be honored, so the stream is
+// acknowledged and ended at once rather than left holding a slot until requestTimeout.
+test('a listen request for tool changes is acknowledged and ended at once', async () => {
+    const started = Date.now()
+    const res = await modern(
+        'subscriptions/listen',
+        undefined,
+        { notifications: { toolsListChanged: true } },
+        { signal: AbortSignal.timeout(10_000) }
+    )
+    const text = await res.text()
+    assert.ok(Date.now() - started < 5_000, `listen stayed open ${Date.now() - started} ms`)
+    assert.match(text, /notifications\/subscriptions\/acknowledged/)
+    assert.match(text, /"resultType":"complete"/)
 })
