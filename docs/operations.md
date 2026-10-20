@@ -60,6 +60,19 @@ never cached. Every other cacheable result keeps the SDK defaults (`ttlMs: 0`,
 `cacheScope: "private"`), and 2025-era responses carry no cache fields. Without
 the hint ChatGPT re-fetched `tools/list` about 80k times a day.
 
+`tools.listChanged` is `false` in both eras. A server built per request never
+sends `notifications/tools/list_changed`, and the cache hint above already covers
+a deploy that changes a tool. With the SDK's default `true`, Claude Code opened a
+`subscriptions/listen` stream on every 2026-07-28 connection. Each stream sat in
+an admission slot until `requestTimeout` cut it at 30 s, and Claude Code then
+reconnected: about 550k streams a day. Manufact counted each cut as an
+`sse/disconnect` error lasting 30 s, which inflated its error rate and average
+latency. SDK clients now open no listen stream; one that listens anyway gets the
+acknowledgement and a graceful `complete` at once. To check after a deploy,
+query Manufact's `metrics_hourly` for `mcp_method = 'subscriptions/listen'` by
+`client_name`. The count should fall toward zero. A rise means some client
+reconnects on the graceful close.
+
 SDK clients parse results through their own schemas and drop keys they do not
 recognize, including unknown server capabilities. Test what the server sends by
 reading the HTTP response, not a client's parsed view.
