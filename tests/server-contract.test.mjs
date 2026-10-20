@@ -53,6 +53,19 @@ const coreTools = [
   'list_files',
   'get_file',
   'delete_file',
+  // Calendar (agentmail-toolkit 0.16.0), out of Labs for every US production
+  // organization since Oct 19 2026. On OAuth (a console JWT) the calendar
+  // routes run behind the same authorizer as mail, and the calendar
+  // permissions follow the message ones: a console JWT holds them unless the
+  // organization's content-deny policy denies them, which answers 403.
+  'get_agenda',
+  'get_event',
+  'create_event',
+  'update_event',
+  'delete_event',
+  'respond_to_invitation',
+  'get_calendar',
+  'update_calendar',
   // auth_me is deliberately absent: excluded from the hosted catalog only
   // (organization/pod/API-key identifiers are unnecessary on the OpenAI
   // surface); it remains available in agentmail-toolkit for other consumers.
@@ -111,4 +124,18 @@ test('get_thread exposes backward message pagination', () => {
   assert.ok(tool.outputSchema.properties.limit)
   assert.ok(tool.outputSchema.properties.nextPageToken)
   assert.match(tool.description, /first page contains the newest messages/)
+})
+
+test('tools that can email external recipients keep their confirmation hints', () => {
+  for (const name of ['create_draft', 'update_draft', 'create_event', 'update_event', 'delete_event', 'respond_to_invitation']) {
+    const { annotations } = manifest.tools.find((tool) => tool.name === name)
+    assert.equal(annotations.destructiveHint, true, `${name} destructiveHint`)
+    assert.equal(annotations.openWorldHint, true, `${name} openWorldHint`)
+  }
+})
+
+test('delete_event leaves out the internal deletionId', () => {
+  const tool = manifest.tools.find(({ name }) => name === 'delete_event')
+  assert.ok(tool.outputSchema.properties.success)
+  assert.equal('deletionId' in tool.outputSchema.properties, false)
 })
