@@ -677,15 +677,17 @@ const staticToolkit = new AgentMailToolkit(new AgentMailClient({ apiKey: 'placeh
 // OpenAI app review treats as unnecessary internal identifiers on this surface —
 // disclosure cannot cure "unnecessary". Hosted sessions get org context via
 // list_organizations/select_organization instead.
+const EXTERNAL_SEND_TOOLS = new Set(['create_draft', 'update_draft', 'create_event', 'update_event', 'delete_event', 'respond_to_invitation'])
 const STATIC_TOOLS = staticToolkit
     .getTools()
     .filter((tool) => tool.name !== 'auth_me')
     .map((tool) => {
-        if (tool.name !== 'create_draft' && tool.name !== 'update_draft') return tool
+        if (!EXTERNAL_SEND_TOOLS.has(tool.name)) return tool
 
-        // Both tools can schedule an irreversible send to external recipients;
-        // creating a draft can also fetch attachments from arbitrary URLs. The
-        // descriptions say so since agentmail-toolkit 0.14.0; the hints stay here.
+        // Each can send irreversible email to external recipients: a draft's
+        // scheduled send, or a calendar invitation, update, cancellation or reply.
+        // Creating a draft can also fetch attachments from arbitrary URLs. The
+        // descriptions say so; the hints stay here.
         return {
             ...tool,
             annotations: {
@@ -745,6 +747,14 @@ const STATIC_TOOLS = staticToolkit
                 }
               : tool
     )
+    // delete_event's deletionId is a background-deletion handle no tool takes: an
+    // unnecessary internal identifier here, as auth_me's are. The tool callback strips
+    // it from the result to match.
+    .map((tool) => {
+        if (tool.name !== 'delete_event') return tool
+        const { deletionId: _deletionId, ...outputSchema } = tool.outputSchema
+        return { ...tool, outputSchema }
+    })
 
 // The uniform failure shape every tool callback returns — one definition so a
 // change to the error contract (redaction, request ids) lands everywhere.
@@ -859,6 +869,7 @@ const SERVER_INFO: Implementation = {
     version: '1.0.0',
     description:
         'Email inboxes for AI agents: create inboxes and send, receive, reply to, and search threaded email. ' +
+        'Each inbox also has a calendar for scheduling events and answering invitations. ' +
         'With AgentID, agents also get their own accounts at third-party apps.',
     websiteUrl: DOCS_URL,
     icons: ICONS.map(({ path, mimeType, sizes }) => ({ src: `${MCP_PUBLIC_URL ?? 'https://mcp.agentmail.to'}${path}`, mimeType, sizes })),
@@ -1078,7 +1089,10 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 // client it was built with, so hand the per-call client to
                 // invoke(), which the toolkit added for this multi-tenant
                 // case, instead of building a fresh toolkit per call.
-                return staticToolkit.invoke(tool.name, client, args, { signal })
+                const result = await staticToolkit.invoke(tool.name, client, args, { signal })
+                if (tool.name !== 'delete_event' || !result.structuredContent) return result
+                const { deletionId: _deletionId, ...structuredContent } = result.structuredContent
+                return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
             } catch (error) {
                 return toolFailure(tool.name, error)
             }

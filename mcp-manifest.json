@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:a91db9d570d5974c52fce1e40e7a849613069660abea5848c5b5a2b5f290520d",
+  "digest": "sha256:ebe6f984120053e0616176c6a17db0d006f7de9d4919333b5c18e58754fbaf96",
   "tools": [
     {
       "name": "list_inboxes",
@@ -1363,7 +1363,7 @@
                   }
                 },
                 "calendarEventId": {
-                  "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event or respond_to_invitation. Absent on other mail",
+                  "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event. Only an invitation this inbox received can be answered with respond_to_invitation, not a reply or cancellation. Absent on other mail",
                   "type": "string"
                 },
                 "size": {
@@ -1867,7 +1867,7 @@
                   }
                 },
                 "calendarEventId": {
-                  "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event or respond_to_invitation. Absent on other mail",
+                  "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event. Only an invitation this inbox received can be answered with respond_to_invitation, not a reply or cancellation. Absent on other mail",
                   "type": "string"
                 },
                 "size": {
@@ -2087,7 +2087,7 @@
                   }
                 },
                 "calendarEventId": {
-                  "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event or respond_to_invitation. Absent on other mail",
+                  "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event. Only an invitation this inbox received can be answered with respond_to_invitation, not a reply or cancellation. Absent on other mail",
                   "type": "string"
                 },
                 "size": {
@@ -2895,7 +2895,7 @@
             }
           },
           "calendarEventId": {
-            "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event or respond_to_invitation. Absent on other mail",
+            "description": "The calendar event this email's invitation, update, cancellation or reply changed, set a few seconds after it arrives (a dated ID for one date of a recurring event); pass it to get_event. Only an invitation this inbox received can be answered with respond_to_invitation, not a reply or cancellation. Absent on other mail",
             "type": "string"
           },
           "size": {
@@ -4408,11 +4408,11 @@
             "description": "Inbox ID: the inbox's email address, from list_inboxes"
           },
           "after": {
-            "description": "Start of the window, as ISO 8601 with a timezone (e.g. 2026-10-20T00:00:00-04:00); now when omitted. Events still running then are included",
+            "description": "Start of the window, as ISO 8601 with a timezone offset or Z (e.g. 2026-10-20T00:00:00-04:00); a time without one is refused. Now when omitted. Events still running then are included",
             "type": "string"
           },
           "before": {
-            "description": "End of the window, as ISO 8601 with a timezone; 90 days after after when omitted. The window is at most 366 days",
+            "description": "End of the window, as ISO 8601 with a timezone offset or Z; 90 days after after when omitted. The window is at most 366 days",
             "type": "string"
           },
           "limit": {
@@ -4557,6 +4557,42 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "rdates": {
+                      "description": "Extra dates the rule does not produce, as wall times or periods",
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "start": {
+                                "type": "string",
+                                "description": "Local start of the extra date"
+                              },
+                              "end": {
+                                "description": "Local end of the extra date, when given as an end",
+                                "type": "string"
+                              },
+                              "duration": {
+                                "description": "ISO 8601 length of the extra date, when given as a duration",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "start"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "truncateBefore": {
+                      "description": "Set when the event was ended early with a mode future delete: no date starting at or after this local time occurs",
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -4822,6 +4858,42 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "rdates": {
+                "description": "Extra dates the rule does not produce, as wall times or periods",
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "description": "Local start of the extra date"
+                        },
+                        "end": {
+                          "description": "Local end of the extra date, when given as an end",
+                          "type": "string"
+                        },
+                        "duration": {
+                          "description": "ISO 8601 length of the extra date, when given as a duration",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "truncateBefore": {
+                "description": "Set when the event was ended early with a mode future delete: no date starting at or after this local time occurs",
+                "type": "string"
               }
             },
             "required": [
@@ -5008,6 +5080,37 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "rdates": {
+                "description": "Extra dates the rule does not produce: YYYY-MM-DDTHH:mm:ss for a timed event, YYYY-MM-DD for an all-day one, or for a timed event a period",
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "description": "Local start of the extra date, YYYY-MM-DDTHH:mm:ss"
+                        },
+                        "end": {
+                          "description": "Local end of the extra date; give end or duration",
+                          "type": "string"
+                        },
+                        "duration": {
+                          "description": "ISO 8601 length of the extra date, e.g. PT30M; give end or duration",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start"
+                      ]
+                    }
+                  ]
+                }
               }
             },
             "required": [
@@ -5045,6 +5148,14 @@
                     "declined",
                     "tentative"
                   ]
+                },
+                "comment": {
+                  "description": "Note the attendee sent with their response; when replacing the list, keep the one get_event returned",
+                  "type": "string"
+                },
+                "respondedAt": {
+                  "description": "When the attendee last responded; when replacing the list, keep the one get_event returned",
+                  "type": "string"
                 }
               },
               "required": [
@@ -5065,20 +5176,8 @@
             "propertyNames": {
               "type": "string"
             },
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                }
-              ]
-            },
-            "description": "Your own key-value data, returned when the event is read; never sent to attendees"
+            "additionalProperties": {},
+            "description": "Your own JSON object, returned when the event is read; never sent to attendees"
           }
         },
         "required": [
@@ -5193,6 +5292,42 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "rdates": {
+                    "description": "Extra dates the rule does not produce, as wall times or periods",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "start": {
+                              "type": "string",
+                              "description": "Local start of the extra date"
+                            },
+                            "end": {
+                              "description": "Local end of the extra date, when given as an end",
+                              "type": "string"
+                            },
+                            "duration": {
+                              "description": "ISO 8601 length of the extra date, when given as a duration",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "start"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "truncateBefore": {
+                    "description": "Set when the event was ended early with a mode future delete: no date starting at or after this local time occurs",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -5357,7 +5492,7 @@
             "type": "string"
           },
           "start": {
-            "description": "New local start in the event's timezone, as in create_event; for a one-off or recurring event send it with end",
+            "description": "New local start in the event's timezone, as in create_event; for a one-off or recurring event send it with end. Refused with mode future: to move every date of a recurring event, send start and end with its UUID",
             "type": "string"
           },
           "end": {
@@ -5367,6 +5502,10 @@
           "timezone": {
             "description": "New time zone; not for a dated ID. IANA time zone, e.g. America/New_York, Europe/London or UTC. Any case and aliases such as US/Eastern are accepted and stored under the canonical name, which can differ from the spelling sent; abbreviations such as PST and UTC offsets are refused",
             "type": "string"
+          },
+          "allDay": {
+            "description": "Switches between a timed and an all-day event; send start, end (as dates for all-day) and timezone with it. Not for a dated ID",
+            "type": "boolean"
           },
           "description": {
             "description": "New details; null clears them",
@@ -5400,7 +5539,7 @@
             ]
           },
           "recurrence": {
-            "description": "Replaces the whole recurrence, exdates included; null makes it a one-off event. Not for a dated ID",
+            "description": "Replaces the whole recurrence, exdates and rdates included, so send what get_event returned with your change; null makes it a one-off event. Not for a dated ID",
             "anyOf": [
               {
                 "type": "object",
@@ -5414,6 +5553,37 @@
                     "type": "array",
                     "items": {
                       "type": "string"
+                    }
+                  },
+                  "rdates": {
+                    "description": "Extra dates the rule does not produce: YYYY-MM-DDTHH:mm:ss for a timed event, YYYY-MM-DD for an all-day one, or for a timed event a period",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "start": {
+                              "type": "string",
+                              "description": "Local start of the extra date, YYYY-MM-DDTHH:mm:ss"
+                            },
+                            "end": {
+                              "description": "Local end of the extra date; give end or duration",
+                              "type": "string"
+                            },
+                            "duration": {
+                              "description": "ISO 8601 length of the extra date, e.g. PT30M; give end or duration",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "start"
+                          ]
+                        }
+                      ]
                     }
                   }
                 },
@@ -5457,6 +5627,14 @@
                     "declined",
                     "tentative"
                   ]
+                },
+                "comment": {
+                  "description": "Note the attendee sent with their response; when replacing the list, keep the one get_event returned",
+                  "type": "string"
+                },
+                "respondedAt": {
+                  "description": "When the attendee last responded; when replacing the list, keep the one get_event returned",
+                  "type": "string"
                 }
               },
               "required": [
@@ -5469,27 +5647,15 @@
             "type": "boolean"
           },
           "metadata": {
-            "description": "Replaces your key-value data; null clears it. Never sent to attendees",
+            "description": "Replaces your data whole, so send what get_event returned with your change; null clears it. Never sent to attendees",
             "anyOf": [
               {
                 "type": "object",
                 "propertyNames": {
                   "type": "string"
                 },
-                "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "boolean"
-                    }
-                  ]
-                },
-                "description": "Your own key-value data, returned when the event is read; never sent to attendees"
+                "additionalProperties": {},
+                "description": "Your own JSON object, returned when the event is read; never sent to attendees"
               },
               {
                 "type": "null"
@@ -5607,6 +5773,42 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "rdates": {
+                    "description": "Extra dates the rule does not produce, as wall times or periods",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "start": {
+                              "type": "string",
+                              "description": "Local start of the extra date"
+                            },
+                            "end": {
+                              "description": "Local end of the extra date, when given as an end",
+                              "type": "string"
+                            },
+                            "duration": {
+                              "description": "ISO 8601 length of the extra date, when given as a duration",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "start"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "truncateBefore": {
+                    "description": "Set when the event was ended early with a mode future delete: no date starting at or after this local time occurs",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -5792,10 +5994,6 @@
             "const": true,
             "description": "Always true; a failed call returns an error result instead"
           },
-          "deletionId": {
-            "description": "Present when a whole event was deleted: it disappears at once and is removed in the background",
-            "type": "string"
-          },
           "event": {
             "description": "Present when dates of a recurring event were cancelled: the cancelled date",
             "type": "object",
@@ -5891,6 +6089,42 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "rdates": {
+                    "description": "Extra dates the rule does not produce, as wall times or periods",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "start": {
+                              "type": "string",
+                              "description": "Local start of the extra date"
+                            },
+                            "end": {
+                              "description": "Local end of the extra date, when given as an end",
+                              "type": "string"
+                            },
+                            "duration": {
+                              "description": "ISO 8601 length of the extra date, when given as a duration",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "start"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "truncateBefore": {
+                    "description": "Set when the event was ended early with a mode future delete: no date starting at or after this local time occurs",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -6170,6 +6404,42 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "rdates": {
+                    "description": "Extra dates the rule does not produce, as wall times or periods",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "start": {
+                              "type": "string",
+                              "description": "Local start of the extra date"
+                            },
+                            "end": {
+                              "description": "Local end of the extra date, when given as an end",
+                              "type": "string"
+                            },
+                            "duration": {
+                              "description": "ISO 8601 length of the extra date, when given as a duration",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "start"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "truncateBefore": {
+                    "description": "Set when the event was ended early with a mode future delete: no date starting at or after this local time occurs",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -6312,6 +6582,14 @@
           "inboxId": {
             "type": "string",
             "description": "Inbox ID: the inbox's email address, from list_inboxes"
+          },
+          "consistency": {
+            "description": "primary to read a change made moments ago; the default, eventual, can trail a change by a few seconds",
+            "type": "string",
+            "enum": [
+              "eventual",
+              "primary"
+            ]
           }
         },
         "required": [
