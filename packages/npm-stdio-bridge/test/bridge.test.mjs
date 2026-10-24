@@ -17,12 +17,33 @@ import {
 
 import {
     addLocalFileAttachmentVariant,
+    LocalEventBridge,
     parseFileRoot,
     parseTools,
     resolveLocalFileAttachments,
     startBridge,
     validateFileRoot,
 } from '../build/index.js'
+
+test('event bridge forwards reference-only envelopes', async () => {
+    const sent = []
+    const bridge = new LocalEventBridge('test-key', async (params) => sent.push(params))
+    bridge.subscriptions.set('message.received:agent@example.com', {
+        name: 'message.received',
+        inboxId: 'agent@example.com',
+    })
+
+    await bridge.forward({
+        eventType: 'message.received',
+        eventId: 'evt_1',
+        message: { inboxId: 'agent@example.com', messageId: 'msg_1', text: 'not forwarded' },
+    })
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].eventId, 'evt_1')
+    assert.deepEqual(sent[0].data, { inboxId: 'agent@example.com', messageId: 'msg_1' })
+    assert.equal('text' in sent[0].data, false)
+})
 
 test('parses the compatibility tool filter', () => {
     assert.equal(parseTools([]), undefined)
