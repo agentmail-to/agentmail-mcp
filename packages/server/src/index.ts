@@ -45,7 +45,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node'
 import { SignJWT } from 'jose'
 import crypto from 'node:crypto'
 import v8 from 'node:v8'
-import { monitorEventLoopDelay } from 'node:perf_hooks'
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks'
 import fs from 'node:fs'
 import type http from 'node:http'
 import { z } from 'zod'
@@ -68,7 +68,7 @@ import {
     type LogLevel,
     type RequestLogContext,
 } from './log.js'
-import { BoundedCounts, CountWindow, counterDeltas } from './stats.js'
+import { BoundedCounts, CountWindow, LatencyWindow, counterDeltas } from './stats.js'
 
 // ============================================================================
 // Config
@@ -361,6 +361,17 @@ let clerkInFlight = 0
 let clerkTimeoutsTotal = 0
 let clerkShedTotal = 0
 
+// Latency and outcomes of the calls this server makes on a request's behalf,
+// Clerk's and the AgentMail API's, for the stats line: when tool calls slow
+// down, it says whether the time went upstream.
+const upstreamLatency = new LatencyWindow()
+const upstreamOutcomes = new CountWindow()
+
+function recordUpstream(name: 'api' | 'clerk', started: number, outcome: string) {
+    upstreamLatency.add(name, performance.now() - started)
+    upstreamOutcomes.add(`${name} ${outcome}`)
+}
+
 export class ClerkUnavailableError extends Error {
     constructor(message: string) {
         super(message)
@@ -400,10 +411,17 @@ export async function boundedClerkCall<T>(
         )
     }
     clerkInFlight++
+    const started = performance.now()
     const underlying = run()
     underlying.then(
-        () => clerkInFlight--,
-        () => clerkInFlight--
+        () => {
+            clerkInFlight--
+            recordUpstream('clerk', started, 'ok')
+        },
+        () => {
+            clerkInFlight--
+            recordUpstream('clerk', started, 'error')
+        }
     )
     let timer: NodeJS.Timeout | undefined
     try {
@@ -647,20 +665,24 @@ function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined
     if (!signal) return undefined
     return (input, init) => {
         const callerSignal = init?.signal
+        const started = performance.now()
         const response = fetch(input, {
             ...init,
             signal: callerSignal ? AbortSignal.any([callerSignal, signal]) : signal,
         })
-        // The API's id for a call it failed goes on the request's log lines,
-        // so a tool.error line leads straight to the API's own logs. The SDK
-        // gets the same promise, and handles its rejection.
+        // Time to response headers, by status class, for the stats line. The
+        // API's id for a call it failed goes on the request's log lines, so a
+        // tool.error line leads straight to the API's own logs. The SDK gets
+        // the same promise, and handles its rejection.
         response.then(
             (answer) => {
+                recordUpstream('api', started, `${Math.floor(answer.status / 100)}xx`)
                 if (answer.ok) return
                 const id = answer.headers.get('apigw-requestid') ?? answer.headers.get('x-amzn-requestid')
                 if (id && /^[A-Za-z0-9=+/_-]{1,64}$/.test(id)) annotateRequest({ api_request_id: id })
             },
-            () => {}
+            (error: unknown) =>
+                recordUpstream('api', started, error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'failed')
         )
         return response
     }
@@ -1984,10 +2006,34 @@ app.set('trust proxy', true)
 // Every request gets its log context (log.ts) before anything else runs, so a
 // line logged while it is served names its request, method, tool and client.
 // On the way out it is counted by MCP method and status for the stats line,
-// which is how requests that log nothing (most of them) still show up.
+// which is how requests that log nothing (most of them) still show up, and its
+// latency is recorded by method.
+//
+// That latency is this process's alone, from the first middleware to the last
+// byte. Manufact measures the same requests at its gateway, so the difference
+// is the path between the two. On 2026-10-20..22 every method gained ~70 ms at
+// the gateway and nothing here could say whether this process spent it.
 // ============================================================================
 
 const requestOutcomes = new CountWindow()
+const requestLatency = new LatencyWindow()
+
+/**
+ * How long ago the platform's proxy stamped the request (x-request-start,
+ * "t=" and a Unix time; Fly sends microseconds, others ms or s). That is the
+ * wait between the proxy and this process's first middleware: the hop from the
+ * edge and the kernel's accept queue. The 2026-08-20 outage was all in that
+ * gap, invisible from inside the process. Anything outside 0-60 s is clock
+ * skew or not the proxy's, and is ignored. Exported for tests.
+ */
+export function proxyWaitMs(header: string | string[] | undefined, nowMs = Date.now()): number | undefined {
+    const match = /t=(\d+(?:\.\d+)?)/.exec(Array.isArray(header) ? (header[0] ?? '') : (header ?? ''))
+    if (!match) return undefined
+    const stamp = Number(match[1])
+    const stampMs = stamp > 1e14 ? stamp / 1000 : stamp > 1e11 ? stamp : stamp * 1000
+    const wait = nowMs - stampMs
+    return wait >= 0 && wait <= 60_000 ? wait : undefined
+}
 
 // Requests by the Fly edge region that received them: the Fly-Region request
 // header, where FLY_REGION is this machine's own region. Cloudflare (in front of
@@ -2024,12 +2070,16 @@ const beginRequest: express.RequestHandler = (req, res, next) => {
     const edgeRegion = edgeRegionOf(req.headers['fly-region'])
     if (edgeRegion) edgeRegionWindow.add(edgeRegionTotals.add(edgeRegion))
     const context = createRequestContext(relayedUserAgent(req.headers['user-agent']), edgeRegion)
+    const proxyWait = proxyWaitMs(req.headers['x-request-start'])
+    if (proxyWait !== undefined) requestLatency.add('proxy_wait', proxyWait)
     let settled = false
     const settle = () => {
         if (settled) return
         settled = true
+        const method = methodClass(context.mcp_method)
+        requestLatency.add(method, performance.now() - context.started)
         // 'close' without 'finish': the client hung up, or a timeout destroyed the stream.
-        requestOutcomes.add(`${methodClass(context.mcp_method)} ${res.writableFinished ? res.statusCode : 'aborted'}`)
+        requestOutcomes.add(`${method} ${res.writableFinished ? res.statusCode : 'aborted'}`)
     }
     res.once('finish', settle)
     res.once('close', settle)
@@ -3169,6 +3219,12 @@ if (CLERK_ENABLED) {
 //                without an MCP method (GET/DELETE 405s, /health, metadata).
 //   edge_regions requests by the Fly edge region that received them: a routing
 //                change between Cloudflare and Fly shows as traffic moving edges
+//   latency_ms   this process's time per request by method: n, p50, p95, p99,
+//                max. Set against Manufact's gateway latency for the same
+//                minute, the gap is the network path. `proxy_wait` is the part
+//                of it after the platform proxy (see proxyWaitMs).
+//   upstream     AgentMail API calls by status class and Clerk calls by
+//                outcome; upstream_ms their latency (API: to response headers)
 //   tool_errors  failed tool calls by kind: API status, invalid arguments
 //                ("expected"), cancelled, no_status
 //   auth         how requests authenticated or why they were refused
@@ -3195,6 +3251,9 @@ export function emitStats() {
         window_s: Math.round((now - statsWindowStart) / 1000),
         requests: requestOutcomes.take(),
         edge_regions: edgeRegionWindow.take(),
+        latency_ms: requestLatency.take(),
+        upstream: upstreamOutcomes.take(),
+        upstream_ms: upstreamLatency.take(),
         tool_errors: toolErrorCounts.take(),
         auth: authDeltas(authCounts),
         events: eventDeltas({

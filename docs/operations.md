@@ -319,11 +319,28 @@ Events:
 The `stats` line reports, for the minute: `requests` by `"<method> <status>"`
 (`http` is anything without an MCP method; `aborted` is a client that hung up or
 a stream a timeout destroyed), `edge_regions` (requests by the Fly edge region
-that received them), `tool_errors` by kind, `auth` outcomes, `events`
+that received them), `latency_ms` by method (n, p50, p95, p99, max of
+this process's time, first middleware to last byte), `upstream` (AgentMail API
+calls by status class, Clerk calls by outcome) with `upstream_ms`, their latency
+(the API's to response headers), `tool_errors` by kind, `auth` outcomes, `events`
 (sheds, timeouts, accepted connections, client errors and the other counters
 `/health` totals), `in_flight` and its peak, event loop lag and its peak, heap,
 connections, CPU steal, and `suppressed`/`dropped`. Groups with nothing in them
 are left out. `AGENTMAIL_STATS_INTERVAL_MS` (default 60000) sets the interval.
+
+`latency_ms` is what settles a latency step like 2026-10-20..22, when every method
+gained ~70 ms at Manufact's gateway: if this process's p50 for the same minutes did
+not move (`ping` is the cleanest, it does no work), the time went to the path
+between the gateway and the machine, not to this code. When `tools/call` slows,
+`upstream_ms.api` and `upstream_ms.clerk` say whether the AgentMail API or Clerk
+took the time. Only SDK calls made for tool calls are timed; `events/*` and the
+internal-org lookup are not.
+
+`latency_ms.proxy_wait` is the time from the platform proxy stamping a request
+(`x-request-start`) to this process's first middleware: the hop from Fly's edge
+and the kernel accept queue, where the 2026-08-20 outage spent its time. It
+depends on the proxy's and the machine's clocks agreeing, so read changes in it,
+not the absolute value.
 
 Edge regions are how a routing problem in front of Fly shows up. Cloudflare,
 in front of Manufact's gateway, hands traffic to Fly's anycast edge, and the two
