@@ -25,7 +25,7 @@ process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.AGENTMAIL_API_URL = `http://127.0.0.1:${upstream.address().port}`
 const { app, installLogging, emitStats, logSdkError, apiErrorFields } = await import('../packages/server/build/index.js')
 const { setLogSink, resetSampling, redact, hashId, log } = await import('../packages/server/build/log.js')
-const { BoundedCounts } = await import('../packages/server/build/stats.js')
+const { BoundedCounts, LatencyWindow } = await import('../packages/server/build/stats.js')
 
 // What production runs at startup: console output, agentmail-toolkit's
 // included, goes through the logger.
@@ -223,6 +223,59 @@ test('bounded counts keep at most their cap of keys and count the rest as other'
     const counts = new BoundedCounts(3)
     for (const key of ['iad', 'ams', 'sjc', 'nrt', 'syd', 'iad']) counts.add(key)
     assert.deepEqual(counts.toJSON(), { iad: 2, ams: 1, sjc: 1, other: 2 })
+})
+
+test("the stats line has this process's latency per method and the API's per call", async (t) => {
+    await withServer(t, async (port) => {
+        await rpc(port, { jsonrpc: '2.0', id: 1, method: 'ping' })
+        upstreamReply = { status: 404, body: notFound, delayMs: 40 }
+        await callTool(port, 'list_threads', { inboxId: 'agent@agentmail.to' })
+        upstreamReply = { status: 200, body: { count: 0, inboxes: [] } }
+        await callTool(port, 'list_inboxes', {})
+        emitStats()
+    })
+    const [stats] = events('stats')
+    const call = stats.latency_ms['tools/call']
+    assert.equal(call.n, 2)
+    assert.ok(call.p50 <= call.p95 && call.p95 <= call.p99 && call.p99 <= call.max, JSON.stringify(call))
+    assert.ok(call.max >= 40)
+    assert.equal(stats.latency_ms.ping.n, 1)
+    assert.deepEqual(stats.upstream, { 'api 4xx': 1, 'api 2xx': 1 })
+    assert.equal(stats.upstream_ms.api.n, 2)
+    assert.ok(stats.upstream_ms.api.max >= 40)
+})
+
+test("the proxy's request stamp gives the wait before this process saw the request", async (t) => {
+    const { proxyWaitMs } = await import('../packages/server/build/index.js')
+    const now = 1_761_360_000_000
+    assert.equal(proxyWaitMs(`t=${(now - 25) * 1000}`, now), 25)
+    assert.equal(proxyWaitMs(`t=${now - 25}`, now), 25)
+    assert.equal(proxyWaitMs(`t=${(now - 2500) / 1000}`, now), 2500)
+    assert.equal(proxyWaitMs(`t=${(now + 5) * 1000}`, now), undefined)
+    assert.equal(proxyWaitMs('t=12', now), undefined)
+    assert.equal(proxyWaitMs('garbage', now), undefined)
+    assert.equal(proxyWaitMs(undefined, now), undefined)
+
+    await withServer(t, async (port) => {
+        await rpc(port, { jsonrpc: '2.0', id: 1, method: 'ping' }, { 'x-request-start': `t=${(Date.now() - 30) * 1000}` })
+        emitStats()
+    })
+    const wait = events('stats')[0].latency_ms.proxy_wait
+    assert.equal(wait.n, 1)
+    assert.ok(wait.max >= 30 && wait.max < 1000, JSON.stringify(wait))
+})
+
+test('latency percentiles are nearest rank over a bounded sample; n and max stay exact', () => {
+    const window = new LatencyWindow()
+    for (let ms = 1; ms <= 100; ms++) window.add('x', ms)
+    assert.deepEqual(window.take().x, { n: 100, p50: 50, p95: 95, p99: 99, max: 100 })
+    for (let i = 0; i < 10_000; i++) window.add('y', i % 2 ? 10 : 20)
+    window.add('y', 5000)
+    const y = window.take().y
+    assert.equal(y.n, 10_001)
+    assert.equal(y.max, 5000)
+    assert.ok([10, 20].includes(y.p50))
+    assert.deepEqual(window.take(), {})
 })
 
 test('concurrent requests keep their own context', async (t) => {
