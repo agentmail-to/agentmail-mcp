@@ -1019,29 +1019,49 @@ const TOOLKIT_ATTACHMENT_REASONS: Record<string, string> = {
  * agentmail-toolkit 0.16 prints its failures with console.error and an object,
  * which Node spreads over several lines. Route the calls it makes (mcp.ts and
  * functions.ts, matched on their exact first argument) to onToolkitEvent and
- * tell the console bridge they are handled.
+ * tell the console bridge they are handled. 0.17 prints the same events as one
+ * line, "[agentmail-toolkit] <label> {json}", when no logger is passed; that is
+ * read too, so a toolkit bump that forgets the logger loses nothing.
  */
 function interceptToolkitConsole(_level: LogLevel, args: unknown[]): boolean {
     const [message, detail] = args
-    if (typeof message !== 'string' || !message.startsWith('[agentmail-toolkit] ') || !isPlainObject(detail)) return false
-    const tool = typeof detail.tool === 'string' ? detail.tool : undefined
-    if (message === '[agentmail-toolkit] tool error') {
+    const prefix = '[agentmail-toolkit] '
+    if (typeof message !== 'string' || !message.startsWith(prefix)) return false
+    let label = message.slice(prefix.length)
+    let fields = detail
+    if (args.length === 1) {
+        const json = label.indexOf(' {')
+        if (json === -1) return false
+        try {
+            fields = JSON.parse(label.slice(json + 1))
+        } catch {
+            return false
+        }
+        label = label.slice(0, json)
+    }
+    if (!isPlainObject(fields)) return false
+    const tool = typeof fields.tool === 'string' ? fields.tool : undefined
+    const text = typeof fields.message === 'string' ? fields.message : undefined
+    if (label === 'tool error') {
         onToolkitEvent({
             type: 'tool_error',
             tool,
-            statusCode: typeof detail.statusCode === 'number' ? detail.statusCode : undefined,
-            body: detail.body,
+            message: text,
+            statusCode: typeof fields.statusCode === 'number' ? fields.statusCode : undefined,
+            body: fields.body,
         })
-    } else if (message === '[agentmail-toolkit] output schema mismatch') {
-        onToolkitEvent({ type: 'output_schema_mismatch', tool, issues: detail.issues })
+    } else if (label === 'output schema mismatch') {
+        onToolkitEvent({ type: 'output_schema_mismatch', tool, message: text, issues: fields.issues })
     } else {
-        const text = message.slice('[agentmail-toolkit] '.length)
-        const size = detail.size ?? detail.contentLength
+        // Attachment skips: 0.17's "attachment not extracted" carries a reason
+        // code; 0.16 has one message per reason.
+        const size = fields.size ?? fields.contentLength
         onToolkitEvent({
             type: 'attachment_not_extracted',
-            reason: TOOLKIT_ATTACHMENT_REASONS[text] ?? text.slice(0, 80),
+            reason:
+                typeof fields.reason === 'string' ? fields.reason : (TOOLKIT_ATTACHMENT_REASONS[label] ?? label.slice(0, 80)),
             size: typeof size === 'number' ? size : undefined,
-            error: typeof detail.error === 'string' ? detail.error : undefined,
+            error: typeof fields.error === 'string' ? fields.error : undefined,
         })
     }
     return true

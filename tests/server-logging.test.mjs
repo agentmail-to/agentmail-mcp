@@ -299,6 +299,25 @@ test('toolkit attachment skips become one line with a reason code', () => {
     assert.deepEqual(events('console'), [])
 })
 
+test("toolkit 0.17's one-line default is read the same way, should a bump forget the logger", () => {
+    // What 0.17 prints with no logger. Outside a request nothing waits for the
+    // tool result, so the failure is logged at once.
+    const body = `${JSON.stringify(notFound).slice(0, 500)}...[truncated]`
+    console.warn(
+        `[agentmail-toolkit] tool error ${JSON.stringify({ tool: 'list_threads', message: 'Inbox not found (HTTP 404)', statusCode: 404, body })}`
+    )
+    console.warn(
+        `[agentmail-toolkit] attachment not extracted ${JSON.stringify({ message: 'too large', reason: 'too_large', attachmentId: 'att_1', size: 9 })}`
+    )
+    assert.deepEqual(events('console'), [])
+    const [failure] = events('tool.error')
+    assert.equal(failure.tool, 'list_threads')
+    assert.equal(failure.kind, '404')
+    assert.equal(failure.api_error, 'NotFoundError')
+    assert.equal(failure.api_message, 'Inbox not found')
+    assert.equal(events('tool.attachment_not_extracted')[0].reason, 'too_large')
+})
+
 test('a burst past the process-wide ceiling is dropped and counted, and the stats line still goes out', () => {
     for (let i = 0; i < 150; i++) log('info', 'test.burst', { i })
     emitStats()
