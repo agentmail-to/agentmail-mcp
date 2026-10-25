@@ -194,7 +194,7 @@ logs them — and the proxy's retries showed up only as multi-second latency on 
 that had not yet reached Express.
 
 The signal is `tcp.tcp_ext.ListenOverflows` in `/health` (equal to `ListenDrops`); any
-increase is dropped connections. The server logs `[accept] backlog overflow` on the
+increase is dropped connections. The server logs `accept.overflow` on the
 transition and `sockets.accepted_total` / `tcp.port.acceptQueue` show the pressure.
 If overflows persist at a raised backlog, the burst rate exceeds what one machine can
 accept and the levers are reducing per-request work on the accept path and horizontal
@@ -206,7 +206,7 @@ scale.
 refused to schedule this vCPU, from `/proc/stat`. On a shared-CPU machine the
 quota freeze is invisible to the process and its logs; steal is the one number
 that separates "our code is slow" from "the host is withholding CPU". Sustained
-steal above 50% logs `[cpu] steal pressure` and means the machine size, not the
+steal above 50% logs `cpu.steal_pressure` and means the machine size, not the
 code, is the constraint.
 
 ## Protocol fast path
@@ -241,3 +241,87 @@ machine. Pings are deliberately not rate limited and need no credentials: a
 rejected or dropped ping makes clients tear down and re-initialize (three
 full-path requests, ~200x the cost of answering), so the answer itself is the
 cheapest defense. `requests.pings_fast_path` in `/health` counts them.
+
+## Logs
+
+Every line is one JSON object. It starts with `ts`, `level`, `event` and
+`machine` (`FLY_MACHINE_ID`). A line logged while a request is served adds that
+request's context:
+
+- `req_id`: random per request.
+- `mcp_method` and `tool`.
+- `client_name`/`client_version`, from `initialize` or the 2026-07-28 `_meta`
+  envelope; `ua` stands in while they are unknown (2025-era calls after
+  `initialize`).
+- `auth` (`oauth`, `api_key` or `none`), `actor` and `org` (pseudonyms, below).
+- `api_request_id`: the AgentMail API's `apigw-requestid` for a call it failed,
+  to find that call in the API's own logs.
+- `duration_ms` since the request arrived.
+
+Nothing spans two lines, so Manufact's log API can be paged by time
+(`start`/`end`), and a line matched to an analytics event by time, method,
+tool, client and status.
+
+Volume is kept low on purpose, because the log API returns only the newest ~50K
+characters per call. There is no per-request access log; outcomes are counted
+on the stats line instead. Lines a client can repeat are sampled per key per
+minute (5 for failures that are the caller's to fix, 30 for errors), and a
+process-wide ceiling of 100 lines a second drops the rest. The next stats line
+counts what was held back (`suppressed`) and dropped (`dropped`).
+
+`actor` is the `hashId` of the API key or Clerk user, and `org` that of the
+AgentMail organization: the first 12 hex characters of SHA-256 over
+`agentmail-mcp:` and the id. To find someone's lines, hash the id the same way:
+
+```bash
+printf 'agentmail-mcp:%s' "$id" | shasum -a 256 | cut -c1-12
+```
+
+String fields are redacted on the way out. Email addresses become `<email>`
+(API error messages quote recipients), Clerk ids become their pseudonym, and API
+keys, bearer tokens and JWTs are masked. Tool arguments, URLs, query strings
+and API error bodies are never logged.
+
+Events:
+
+- `boot` (once per process): build, Node version, region, image, configuration
+  and masked environment.
+- `stats` (once a minute per machine; see below).
+- `tool.error`: a failed tool call. `kind` is the API status, `expected` (the
+  caller's to fix: invalid arguments, an organization to select), `cancelled`,
+  `clerk_unavailable`, `output_schema` or `no_status`. API failures add
+  `api_status`, `api_error`, `api_code`, `api_message`, `api_fields` (the field
+  paths a validation error names) and `api_request_id`. API 4xx and `expected`
+  are info; 401 on an OAuth call is a warning (the API refused the console JWT
+  this server signed); everything else is an error, with `stack` when thrown.
+- `tool.attachment_not_extracted`: `get_attachment` returned the attachment
+  without its text; `reason` says why.
+- `mcp.rejected` (info, no stack): the SDK refused a client's request;
+  `rejection` names it, such as `initialize-with-modern-header` (-32020).
+  `mcp.error` is any other SDK error, with `stack`.
+- `auth.malformed_header`, `auth.clerk_rejected` (info, sampled),
+  `auth.missing_claims` (warn), `auth.handler_error` (error),
+  `auth.org_mapping_unavailable` (warn). Expired or rejected OAuth tokens and
+  requests with no credentials log nothing; `/health` `auth` counts them.
+- `request.timeout`, `admission.shedding`/`admission.recovered`,
+  `fds.pressure`/`fds.recovered`, `accept.overflow`/`accept.recovered`,
+  `cpu.steal_pressure`/`cpu.steal_recovered`, `heap.pressure`,
+  `drain.start`/`drain.exit` (warn).
+- `http.error` (error) and `http.client_error` (info): sanitized route failures.
+- `http.inbound_headers`: the header names (never values) of the first MCP
+  request each process serves, to see what the platform's proxies add.
+- `console`: anything else printed through `console` (libraries), as one line.
+  agentmail-toolkit 0.16's own error prints are read as `tool.error` instead.
+
+The `stats` line reports, for the minute: `requests` by `"<method> <status>"`
+(`http` is anything without an MCP method; `aborted` is a client that hung up or
+a stream a timeout destroyed), `tool_errors` by kind, `auth` outcomes, `events`
+(sheds, timeouts, accepted connections, client errors and the other counters
+`/health` totals), `in_flight` and its peak, event loop lag and its peak, heap,
+connections, CPU steal, and `suppressed`/`dropped`. Groups with nothing in them
+are left out. `AGENTMAIL_STATS_INTERVAL_MS` (default 60000) sets the interval.
+
+`/health` has the cumulative `auth` counters and `logs` (lines written by level,
+suppressed and dropped totals). `build_sha` reads `BUILD_SHA`, which Manufact does
+not set; until it does, the `boot` line's `image` (`FLY_IMAGE_REF`) identifies the
+deployment.

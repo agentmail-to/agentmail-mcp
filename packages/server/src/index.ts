@@ -31,6 +31,7 @@ import { clerkClient, clerkMiddleware } from '@clerk/express'
 import { AgentMailClient } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 import {
+    CLIENT_INFO_META_KEY,
     McpServer,
     ProtocolError,
     createMcpHandler,
@@ -49,6 +50,24 @@ import fs from 'node:fs'
 import type http from 'node:http'
 import { z } from 'zod'
 import { ICON_PNG, ICON_SVG } from './icon.js'
+import {
+    annotateRequest,
+    createRequestContext,
+    currentRequestContext,
+    errorFields,
+    hashId,
+    installConsoleBridge,
+    log,
+    logCounters,
+    logSampled,
+    outsideRequestContext,
+    runWithRequestContext,
+    takeSuppressed,
+    type LogFields,
+    type LogLevel,
+    type RequestLogContext,
+} from './log.js'
+import { CountWindow, counterDeltas } from './stats.js'
 
 // ============================================================================
 // Config
@@ -174,6 +193,19 @@ export async function signConsoleJwt(organizationId: string, clientId?: string):
         .sign(privateKey)
 }
 
+/**
+ * A tool failure that is the caller's to fix (pick an organization, finish
+ * signup, wait for provisioning), with its guidance as the message. The client
+ * sees the message exactly as with a plain Error; the class only tells the
+ * logs it is expected, so it is logged without a stack.
+ */
+export class ExpectedToolError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'ExpectedToolError'
+    }
+}
+
 type InternalOrganizationLookupDependencies = {
     apiUrl: string | undefined
     signToken: (clerkOrgId: string) => Promise<string>
@@ -242,12 +274,12 @@ export async function getInternalOrganizationId(
             throw new Error(`/v0/auth/internal-org failed: ${response.status} ${body}`)
         }
         if (attempt >= retryDelaysMs.length) {
-            console.warn('[auth] AgentMail organization mapping is still unavailable', {
-                clerkOrganizationId: clerkOrgId,
-                status: response.status,
-                body,
+            log('warn', 'auth.org_mapping_unavailable', {
+                clerk_org: hashId(clerkOrgId),
+                api_status: response.status,
+                attempts: attempt + 1,
             })
-            throw new Error(
+            throw new ExpectedToolError(
                 'Your AgentMail workspace is still provisioning. Retry this tool in a few seconds.'
             )
         }
@@ -503,7 +535,7 @@ async function resolveClerkConsoleJwt(
 ): Promise<string> {
     const memberships = await listUserOrgMemberships(clerkUserId)
     if (memberships.length === 0) {
-        throw new Error(
+        throw new ExpectedToolError(
             'Your account has no AgentMail Organization yet. Sign in once at ' +
                 'https://console.agentmail.to to finish setup, then retry this tool.'
         )
@@ -514,6 +546,8 @@ async function resolveClerkConsoleJwt(
         // Path 1: token specified an org. Validate membership before trusting it.
         const matching = memberships.find((m) => m.organization.id === selectedClerkOrgId)
         if (!matching) {
+            // Not ExpectedToolError: a token naming an org its user is not in
+            // means Clerk and its own membership records disagree.
             throw new Error(
                 `User ${clerkUserId} is not a member of organization ${selectedClerkOrgId}. ` +
                     `Token claim does not match Clerk membership records.`
@@ -534,7 +568,7 @@ async function resolveClerkConsoleJwt(
             const orgList = memberships
                 .map((m) => `  - ${m.organization.name} (${m.organization.id})`)
                 .join('\n')
-            throw new Error(
+            throw new ExpectedToolError(
                 `You belong to ${memberships.length} organizations and haven't selected one yet. ` +
                     `Call the \`select_organization\` tool with one of these, then retry:\n${orgList}`
             )
@@ -549,6 +583,7 @@ async function resolveClerkConsoleJwt(
         if (internalOrgIdCache.size >= CLERK_CACHE_MAX_ENTRIES) internalOrgIdCache.clear()
         internalOrgIdCache.set(chosenOrg.id, internalOrgId)
     }
+    annotateRequest({ org: hashId(internalOrgId) })
 
     // `clientId` is not sent for now. The API looked its name up from the HTTP authorizer, and that
     // lookup timed out on every call (2026-10-15), adding about 450 ms to OAuth tool calls. It goes back
@@ -611,10 +646,22 @@ function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined
     if (!signal) return undefined
     return (input, init) => {
         const callerSignal = init?.signal
-        return fetch(input, {
+        const response = fetch(input, {
             ...init,
             signal: callerSignal ? AbortSignal.any([callerSignal, signal]) : signal,
         })
+        // The API's id for a call it failed goes on the request's log lines,
+        // so a tool.error line leads straight to the API's own logs. The SDK
+        // gets the same promise, and handles its rejection.
+        response.then(
+            (answer) => {
+                if (answer.ok) return
+                const id = answer.headers.get('apigw-requestid') ?? answer.headers.get('x-amzn-requestid')
+                if (id && /^[A-Za-z0-9=+/_-]{1,64}$/.test(id)) annotateRequest({ api_request_id: id })
+            },
+            () => {}
+        )
+        return response
     }
 }
 
@@ -756,11 +803,264 @@ const STATIC_TOOLS = staticToolkit
         return { ...tool, outputSchema }
     })
 
+// ============================================================================
+// Tool failure logging
+//
+// A failed tool call reaches the client as an isError result inside an HTTP
+// 200, so it is logged here or nowhere, once per call. The level says whose
+// problem it is. An AgentMail API 4xx (an inbox that does not exist, a plan
+// limit, arguments the API refused) and invalid arguments are the caller's:
+// info, sampled per tool and status, since an agent retrying a bad call repeats
+// it dozens of times a minute. 5xx, and failures with no status at all, are
+// this server's or the API's: error. A 401 on an OAuth call is in between: it
+// is the API refusing the console JWT this server signed, so it is a warning.
+// Every failure is counted on the stats line, sampled or not.
+//
+// The upstream status and error body of a toolkit tool come from
+// agentmail-toolkit itself, which prints them with console.error (0.16); the
+// console bridge hands those calls to onToolkitEvent instead of printing them.
+// They are parked on the request until the call returns, so the one line has
+// both them and the outcome. A toolkit release with a logger option replaces
+// the console route without changing the lines.
+// ============================================================================
+
+/**
+ * What agentmail-toolkit reports about a failure or a degraded result, as far
+ * as this server reads it: the event shape of its logger option, which 0.16's
+ * console calls are translated into.
+ */
+type ToolkitLogEvent = {
+    type: string
+    tool?: string
+    /** The text the tool result carries. */
+    message?: string
+    statusCode?: number
+    body?: unknown
+    issues?: unknown
+    reason?: string
+    size?: number
+    error?: string
+}
+
+type ToolFailure = {
+    /** AgentMail API status, when the failure is an API answer. */
+    status?: number
+    body?: unknown
+    /** The text the client got, for failures with no API body. */
+    message?: string
+    /** The caller's to fix (invalid arguments, an org to select). */
+    expected?: boolean
+    /** The request was cancelled; nobody is waiting for the result. */
+    cancelled?: boolean
+    clerkUnavailable?: boolean
+    /** Schema issues of a result that did not match its output schema. */
+    issues?: unknown
+    /** A thrown error nobody expected, logged with its stack. */
+    error?: unknown
+}
+
+const toolkitFailures = new WeakMap<RequestLogContext, ToolkitLogEvent>()
+const toolErrorCounts = new CountWindow()
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The API's own account of an error, without the boilerplate (fix, docs) that
+ * is most of its size. toolkit 0.16 passes bodies over 500 characters as
+ * truncated, unparseable JSON text, so fields are read from text too.
+ */
+export function apiErrorFields(body: unknown): LogFields {
+    let parsed: unknown = body
+    if (typeof body === 'string') {
+        try {
+            parsed = JSON.parse(body)
+        } catch {
+            const field = (name: string) => new RegExp(`"${name}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(body)?.[1]
+            parsed = { name: field('name'), code: field('code'), message: field('message') }
+        }
+    }
+    if (!isPlainObject(parsed)) return {}
+    const fields: LogFields = {}
+    if (typeof parsed.name === 'string') fields.api_error = parsed.name.slice(0, 80)
+    if (typeof parsed.code === 'string') fields.api_code = parsed.code.slice(0, 80)
+    const message = parsed.message ?? parsed.detail
+    if (typeof message === 'string') fields.api_message = message.slice(0, 200)
+    // Which fields a validation error names, never what was in them.
+    if (Array.isArray(parsed.errors)) {
+        fields.api_fields = parsed.errors
+            .slice(0, 5)
+            .map((entry) => (isPlainObject(entry) ? pathOf(entry.path) : undefined))
+            .filter((path): path is string => Boolean(path))
+    }
+    return fields
+}
+
+/** A validation path as text: `to.0` from ["to", 0], or the string as given. */
+function pathOf(path: unknown): string | undefined {
+    if (Array.isArray(path)) return path.map(String).join('.').slice(0, 80)
+    return typeof path === 'string' ? path.slice(0, 80) : undefined
+}
+
+/** Paths of schema issues, never the values that failed. */
+function issueFields(issues: unknown): LogFields {
+    if (!Array.isArray(issues)) return {}
+    return {
+        issues: issues.length,
+        issue_paths: issues.slice(0, 5).map((issue) => (isPlainObject(issue) && pathOf(issue.path)) || '?'),
+    }
+}
+
+function logToolFailure(tool: string, failure: ToolFailure) {
+    const { status } = failure
+    let level: LogLevel
+    let kind: string
+    if (failure.cancelled) {
+        level = 'info'
+        kind = 'cancelled'
+    } else if (status !== undefined && status >= 400 && status < 500) {
+        level = status === 401 && currentRequestContext()?.auth === 'oauth' ? 'warn' : 'info'
+        kind = String(status)
+    } else if (failure.expected) {
+        level = 'info'
+        kind = 'expected'
+    } else if (failure.clerkUnavailable) {
+        level = 'warn'
+        kind = 'clerk_unavailable'
+    } else {
+        level = 'error'
+        kind = status !== undefined ? String(status) : failure.issues !== undefined ? 'output_schema' : 'no_status'
+    }
+    toolErrorCounts.add(kind)
+    const fields: LogFields = {
+        tool,
+        kind,
+        ...(status !== undefined && { api_status: status }),
+        ...apiErrorFields(failure.body),
+        ...issueFields(failure.issues),
+    }
+    if (failure.error !== undefined) {
+        Object.assign(fields, errorFields(failure.error, { stack: level === 'error' }))
+    } else if (failure.message && !('api_message' in fields)) {
+        fields.error = failure.message.split('\n')[0]!.slice(0, 300)
+    }
+    logSampled(level, 'tool.error', `tool.error:${tool}:${kind}`, level === 'error' ? 30 : 5, fields)
+}
+
+/** What a thrown error says about the failure; see logToolFailure. */
+function failureOf(error: unknown, signal?: AbortSignal): ToolFailure {
+    // AgentMailError, duck-typed: its numeric statusCode and parsed body.
+    if (isPlainObject(error) && typeof error.statusCode === 'number') {
+        return { status: error.statusCode, body: error.body, cancelled: signal?.aborted }
+    }
+    if (error instanceof ExpectedToolError) return { expected: true, message: error.message }
+    if (error instanceof ClerkUnavailableError) return { clerkUnavailable: true, message: error.message }
+    return { error, cancelled: signal?.aborted }
+}
+
+/**
+ * agentmail-toolkit's account of a failure, parked on the request until
+ * logToolkitResult has the outcome. Outside a request there is no outcome to
+ * wait for, so it is logged at once.
+ */
+function onToolkitEvent(event: ToolkitLogEvent) {
+    if (event.type === 'tool_error' || event.type === 'output_schema_mismatch') {
+        const context = currentRequestContext()
+        if (context) toolkitFailures.set(context, event)
+        else logToolFailure(event.tool ?? 'unknown', toolkitFailure(event))
+        return
+    }
+    if (event.type === 'attachment_not_extracted') {
+        // get_attachment still returns the attachment, without its text.
+        logSampled('info', 'tool.attachment_not_extracted', `attachment:${event.reason}`, 10, {
+            reason: event.reason,
+            size: event.size,
+            error: event.error,
+        })
+        return
+    }
+    logSampled('info', 'toolkit.event', `toolkit:${event.type}`, 10, { toolkit_event: event.type, tool: event.tool })
+}
+
+function toolkitFailure(event: ToolkitLogEvent): ToolFailure {
+    if (event.type === 'output_schema_mismatch') return { issues: event.issues ?? [] }
+    return { status: event.statusCode, body: event.body, message: event.message }
+}
+
+/** Log a toolkit tool's isError result with what the toolkit said about it. */
+function logToolkitResult(tool: string, result: { content?: unknown }, signal: AbortSignal) {
+    const context = currentRequestContext()
+    const event = context ? toolkitFailures.get(context) : undefined
+    if (context) toolkitFailures.delete(context)
+    const text = Array.isArray(result.content) && isPlainObject(result.content[0]) ? result.content[0].text : undefined
+    // The toolkit reports every failure but one: arguments its own schema
+    // refused, which are the caller's to fix. (That reading needs the toolkit's
+    // reports to arrive, which is why installLogging is the server's entry
+    // point and tests that look at tool failures call it.)
+    const failure: ToolFailure = event ? toolkitFailure(event) : { expected: true }
+    logToolFailure(tool, {
+        ...failure,
+        message: failure.message ?? (typeof text === 'string' ? text : undefined),
+        cancelled: signal.aborted,
+    })
+}
+
+// agentmail-toolkit 0.16's getAttachment skip messages, as reason codes.
+const TOOLKIT_ATTACHMENT_REASONS: Record<string, string> = {
+    'attachment download URL is not https, skipping extraction': 'not_https',
+    'attachment too large to extract, skipping': 'too_large',
+    'content-length exceeds cap, skipping': 'content_length_exceeds_cap',
+    'downloaded attachment exceeds cap, skipping': 'download_exceeds_cap',
+    'attachment extraction failed': 'extraction_failed',
+}
+
+/**
+ * agentmail-toolkit 0.16 prints its failures with console.error and an object,
+ * which Node spreads over several lines. Route the calls it makes (mcp.ts and
+ * functions.ts, matched on their exact first argument) to onToolkitEvent and
+ * tell the console bridge they are handled.
+ */
+function interceptToolkitConsole(_level: LogLevel, args: unknown[]): boolean {
+    const [message, detail] = args
+    if (typeof message !== 'string' || !message.startsWith('[agentmail-toolkit] ') || !isPlainObject(detail)) return false
+    const tool = typeof detail.tool === 'string' ? detail.tool : undefined
+    if (message === '[agentmail-toolkit] tool error') {
+        onToolkitEvent({
+            type: 'tool_error',
+            tool,
+            statusCode: typeof detail.statusCode === 'number' ? detail.statusCode : undefined,
+            body: detail.body,
+        })
+    } else if (message === '[agentmail-toolkit] output schema mismatch') {
+        onToolkitEvent({ type: 'output_schema_mismatch', tool, issues: detail.issues })
+    } else {
+        const text = message.slice('[agentmail-toolkit] '.length)
+        const size = detail.size ?? detail.contentLength
+        onToolkitEvent({
+            type: 'attachment_not_extracted',
+            reason: TOOLKIT_ATTACHMENT_REASONS[text] ?? text.slice(0, 80),
+            size: typeof size === 'number' ? size : undefined,
+            error: typeof detail.error === 'string' ? detail.error : undefined,
+        })
+    }
+    return true
+}
+
+/**
+ * Route all console output through the logger (see installConsoleBridge),
+ * with agentmail-toolkit's calls read as tool failures. The listening process
+ * calls it at startup; tests that look at those lines call it too.
+ */
+export function installLogging(): void {
+    installConsoleBridge(interceptToolkitConsole)
+}
+
 // The uniform failure shape every tool callback returns — one definition so a
 // change to the error contract (redaction, request ids) lands everywhere.
-const toolFailure = (name: string, error: unknown) => {
+const toolFailure = (name: string, error: unknown, signal?: AbortSignal) => {
     const message = error instanceof Error ? error.message : String(error)
-    console.error(`[mcp] tool ${name} failed:`, error)
+    logToolFailure(name, failureOf(error, signal))
     return {
         content: [{ type: 'text' as const, text: `Error: ${message}` }],
         isError: true,
@@ -822,7 +1122,7 @@ const runGetThread = async (
     })
     const parsed = z.object(tool.outputSchema).safeParse(normalized)
     if (!parsed.success) {
-        console.error('[mcp] get_thread output schema mismatch', { issues: parsed.error.issues })
+        logToolFailure('get_thread', { issues: parsed.error.issues })
         return {
             content: [
                 {
@@ -1093,7 +1393,13 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 }
 
                 if (tool.name === 'get_thread') {
-                    return runGetThread(tool, client, args, signal)
+                    // Returned, not awaited, so a rejection skips the catch below
+                    // and the SDK turns it into the result text. Log it on the way
+                    // past without changing that text.
+                    return runGetThread(tool, client, args, signal).catch((error: unknown) => {
+                        logToolFailure(tool.name, failureOf(error, signal))
+                        throw error
+                    })
                 }
 
                 // The toolkit's own callbacks are bound to the placeholder
@@ -1101,11 +1407,12 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 // invoke(), which the toolkit added for this multi-tenant
                 // case, instead of building a fresh toolkit per call.
                 const result = await staticToolkit.invoke(tool.name, client, args, { signal })
+                if (result.isError) logToolkitResult(tool.name, result, signal)
                 if (tool.name !== 'delete_event' || !result.structuredContent) return result
                 const { deletionId: _deletionId, ...structuredContent } = result.structuredContent
                 return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
             } catch (error) {
-                return toolFailure(tool.name, error)
+                return toolFailure(tool.name, error, signal)
             }
         })
     }
@@ -1180,9 +1487,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                         structuredContent,
                     }
                 } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error)
-                    console.error('[mcp] tool list_organizations failed:', error)
-                    return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+                    return toolFailure('list_organizations', error)
                 }
             }
         )
@@ -1272,9 +1577,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                         structuredContent,
                     }
                 } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error)
-                    console.error('[mcp] tool select_organization failed:', error)
-                    return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+                    return toolFailure('select_organization', error)
                 }
             }
         )
@@ -1454,7 +1757,7 @@ export async function fetchClerkAuthServerMetadata(
     const { fetcher = fetch, now = Date.now, cache = asMetadataCache, ttlMs = AS_METADATA_TTL_MS } = deps
     if (cache.value && now() - cache.fetchedAt < ttlMs) return cache.value
     if (!cache.inFlight) {
-        cache.inFlight = (async () => {
+        cache.inFlight = outsideRequestContext(async () => {
             const response = await fetcher(`${deriveClerkFapiUrl(publishableKey)}/.well-known/oauth-authorization-server`, {
                 signal: AbortSignal.timeout(AS_METADATA_TIMEOUT_MS),
             })
@@ -1463,7 +1766,7 @@ export async function fetchClerkAuthServerMetadata(
             cache.value = value
             cache.fetchedAt = now()
             return value
-        })().finally(() => {
+        }).finally(() => {
             cache.inFlight = undefined
         })
     }
@@ -1471,17 +1774,35 @@ export async function fetchClerkAuthServerMetadata(
         return await cache.inFlight
     } catch (error) {
         if (cache.value) {
-            console.warn('[oauth] serving stale authorization-server metadata:', error)
+            log('warn', 'oauth.as_metadata_stale', errorFields(error))
             return cache.value
         }
         throw error
     }
 }
 
+// How requests authenticated, cumulative (/health) and per stats line. The
+// rejections are counted, not logged per request: an expired Clerk token is
+// every long-lived connection's daily routine (61% of all log lines before
+// this), and the junk unauthenticated client alone sends ~1.4M a day.
+const authCounts = {
+    api_key: 0,
+    oauth: 0,
+    none: 0,
+    no_credentials: 0,
+    token_rejected: 0,
+    malformed_header: 0,
+    clerk_rejected: 0,
+    missing_claims: 0,
+    handler_error: 0,
+}
+
 const authRouter: express.RequestHandler = async (req, res, next) => {
     const userAgent = relayedUserAgent(req.headers['user-agent'])
     const apiKey = extractApiKey(req)
     if (apiKey) {
+        authCounts.api_key++
+        annotateRequest({ auth: 'api_key', actor: hashId(apiKey) })
         req.authSource = { kind: 'apiKey', apiKey, userAgent }
         return next()
     }
@@ -1494,10 +1815,12 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
         // threw on a detached promise and crash-looped production three times
         // on 2026-07-19; the guard stays so the shape is answered, never parsed.
         const authHeader = req.headers.authorization
+        annotateRequest({ auth: 'oauth' })
         if (authHeader && !authHeader.split(' ')[1]) {
             // Don't log the header value: a token joined by non-space
             // whitespace would land here and must not reach the logs.
-            console.warn('[auth] malformed Authorization header (no token after scheme), returning 401')
+            authCounts.malformed_header++
+            logSampled('info', 'auth.malformed_header', 'auth.malformed_header', 5)
             return sendOAuthChallenge(req, res)
         }
 
@@ -1510,18 +1833,25 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
         // Clerk access tokens live 24 h, so every long-lived connection hits
         // this path once a day.
         if (authHeader && !clerkOAuthPreflight(req)) {
-            console.warn('[auth] OAuth token not accepted (expired or invalid), returning 401 challenge')
+            authCounts.token_rejected++
             return sendOAuthChallenge(req, res)
         }
 
         // No header at all: the standard challenge that starts OAuth discovery.
-        if (!authHeader) return sendOAuthChallenge(req, res)
+        if (!authHeader) {
+            authCounts.no_credentials++
+            annotateRequest({ auth: 'none' })
+            return sendOAuthChallenge(req, res)
+        }
 
         try {
             const token = authHeader.split(' ')[1]
             const authInfo = buildClerkAuthInfo(req, token)
             if (!authInfo) {
-                console.warn('[auth] accepted OAuth token lacks userId/clientId/scopes, returning 401 challenge')
+                // Clerk accepted the token but it names no user, client or
+                // scopes: not a client mistake, so it is a warning.
+                authCounts.missing_claims++
+                logSampled('warn', 'auth.missing_claims', 'auth.missing_claims', 30)
                 return sendOAuthChallenge(req, res)
             }
             // The MCP SDK forwards req.auth to tool handlers as extra.authInfo,
@@ -1538,16 +1868,21 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
                 clerkClientId: authInfo.clientId,
                 userAgent,
             }
+            authCounts.oauth++
+            annotateRequest({ actor: hashId(authInfo.extra.userId) })
             return next()
         } catch (error) {
             // Auth-layer failure → 401 challenge, never a crash.
-            console.error('[auth] OAuth token handling threw:', error)
+            authCounts.handler_error++
+            logSampled('error', 'auth.handler_error', 'auth.handler_error', 30, errorFields(error, { stack: true }))
             if (!res.headersSent) sendOAuthChallenge(req, res)
             return
         }
     }
 
     // No API key, no Clerk. Tools will return the noAuthMessage when called.
+    authCounts.none++
+    annotateRequest({ auth: 'none' })
     req.authSource = { kind: 'none' }
     next()
 }
@@ -1599,8 +1934,11 @@ const clerkAuthBoundary: express.RequestHandler = (req, res, next) => {
     return clerkRequestMiddleware(req, res, (error?: unknown) => {
         if (!error) return next()
 
+        // A malformed JWT from the client (SyntaxError while Clerk decodes it).
         const errorName = error instanceof Error ? error.name : 'UnknownError'
-        console.warn(`[auth] Clerk request authentication failed (${errorName}), returning 401`)
+        authCounts.clerk_rejected++
+        annotateRequest({ auth: 'oauth' })
+        logSampled('info', 'auth.clerk_rejected', `auth.clerk_rejected:${errorName}`, 1, { error_type: errorName })
         if (!res.headersSent) return sendOAuthChallenge(req, res)
         next(error)
     })
@@ -1618,6 +1956,82 @@ export const app = express()
 // forward Host reliably (fly.io preview), the publicUrlOverride middleware
 // below provides a stronger fallback using the MCP_PUBLIC_URL env var.
 app.set('trust proxy', true)
+
+// ============================================================================
+// Request context and accounting
+//
+// Every request gets its log context (log.ts) before anything else runs, so a
+// line logged while it is served names its request, method, tool and client.
+// On the way out it is counted by MCP method and status for the stats line,
+// which is how requests that log nothing (most of them) still show up.
+// ============================================================================
+
+const requestOutcomes = new CountWindow()
+
+const COMMON_METHODS = new Set(['ping', 'initialize', 'server/discover', 'notifications/initialized', 'tools/list', 'tools/call'])
+
+/** A request's stats key: its MCP method when common, so clients cannot mint keys. */
+function methodClass(method: string | undefined): string {
+    if (method === undefined) return 'http'
+    if (COMMON_METHODS.has(method)) return method
+    return method.startsWith('notifications/') ? 'notifications/other' : 'other'
+}
+
+// The header names (never values) of the first MCP request each process
+// serves: what the platform's proxies add, among them whatever id would join
+// these lines to Manufact's own request events.
+let inboundHeadersLogged = false
+
+const beginRequest: express.RequestHandler = (req, res, next) => {
+    const context = createRequestContext(relayedUserAgent(req.headers['user-agent']))
+    let settled = false
+    const settle = () => {
+        if (settled) return
+        settled = true
+        // 'close' without 'finish': the client hung up, or a timeout destroyed the stream.
+        requestOutcomes.add(`${methodClass(context.mcp_method)} ${res.writableFinished ? res.statusCode : 'aborted'}`)
+    }
+    res.once('finish', settle)
+    res.once('close', settle)
+    runWithRequestContext(context, next)
+}
+app.use(beginRequest)
+
+const MCP_NAME = /^[A-Za-z0-9_./:-]{1,64}$/
+const mcpName = (value: unknown) => (typeof value === 'string' && MCP_NAME.test(value) ? value : undefined)
+
+/**
+ * What the JSON-RPC body says about the request, for its log context. A
+ * 2025-era client names itself only in initialize; a 2026-07-28 client does on
+ * every request, in _meta.
+ */
+const noteMcpRequest: express.RequestHandler = (req, _res, next) => {
+    const body = req.body as unknown
+    if (Array.isArray(body)) {
+        annotateRequest({ mcp_method: '(batch)' })
+    } else if (isPlainObject(body) && body.method !== undefined) {
+        const method = mcpName(body.method) ?? '(invalid)'
+        const params = isPlainObject(body.params) ? body.params : undefined
+        const meta = params && isPlainObject(params._meta) ? params._meta : undefined
+        const clientInfo =
+            method === 'initialize' && isPlainObject(params?.clientInfo)
+                ? params.clientInfo
+                : meta && isPlainObject(meta[CLIENT_INFO_META_KEY])
+                  ? meta[CLIENT_INFO_META_KEY]
+                  : undefined
+        annotateRequest({
+            mcp_method: method,
+            ...(method === 'tools/call' && { tool: mcpName(params?.name) ?? '(invalid)' }),
+            ...(typeof clientInfo?.name === 'string' && { client_name: clientInfo.name.slice(0, 64) }),
+            ...(typeof clientInfo?.version === 'string' && { client_version: clientInfo.version.slice(0, 32) }),
+        })
+        if (!inboundHeadersLogged) {
+            inboundHeadersLogged = true
+            log('info', 'http.inbound_headers', { names: Object.keys(req.headers).sort().slice(0, 50) })
+        }
+    }
+    next()
+}
 
 // HSTS is set by Express on every response handled by the app, including its
 // own health checks and malformed-request errors. The edge redirects cleartext
@@ -1749,11 +2163,14 @@ const LAG_SAMPLE_INTERVAL_MS = 1000
 const loopDelay = monitorEventLoopDelay({ resolution: 20 })
 loopDelay.enable()
 let recentLagMs = 0
+// The worst one-second mean since the last stats line, which resets it.
+let lagPeakMs = 0
 // Mean over the window, not max: a single GC pause spikes max and would shed
 // traffic on a perfectly healthy server. Sustained saturation is what we react
 // to, and that is what shows up in the mean.
 setInterval(() => {
     recentLagMs = loopDelay.mean / 1e6
+    if (recentLagMs > lagPeakMs) lagPeakMs = recentLagMs
     loopDelay.reset()
 }, LAG_SAMPLE_INTERVAL_MS).unref()
 
@@ -1817,10 +2234,10 @@ function sampleDescriptors() {
     const pressured = open > MAX_FDS * 0.8
     if (pressured && !fdPressure) {
         fdPressure = true
-        console.warn(`[fds] pressure: ${open} open of ${MAX_FDS} (soft limit), ${openConnections} connections`)
+        log('warn', 'fds.pressure', { open_fds: open, max_fds: MAX_FDS, open_connections: openConnections })
     } else if (!pressured && fdPressure) {
         fdPressure = false
-        console.warn(`[fds] recovered: ${open} open of ${MAX_FDS}`)
+        log('warn', 'fds.recovered', { open_fds: open, max_fds: MAX_FDS })
     }
 }
 
@@ -1975,15 +2392,16 @@ function sampleAcceptQueue() {
     const dropped = overflows - lastOverflow
     lastOverflow = overflows
     if (dropped > 0 && !overflowing) {
+        // Connections are arriving faster than the event loop drains accept().
         overflowing = true
-        console.warn(
-            `[accept] backlog overflow: kernel dropped ${dropped} handshake(s) this interval ` +
-                `(${overflows - listenOverflowBase} since start, backlog ${LISTEN_BACKLOG}). ` +
-                `Connections are arriving faster than the event loop drains accept().`
-        )
+        log('warn', 'accept.overflow', {
+            dropped,
+            dropped_since_start: overflows - listenOverflowBase,
+            listen_backlog: LISTEN_BACKLOG,
+        })
     } else if (dropped === 0 && overflowing) {
         overflowing = false
-        console.warn(`[accept] backlog recovered (${overflows - listenOverflowBase} dropped total)`)
+        log('warn', 'accept.recovered', { dropped_since_start: overflows - listenOverflowBase })
     }
 }
 
@@ -2058,15 +2476,14 @@ function sampleCpu() {
             cpuPct.steal_pct = Math.round(steal)
             cpuPct.idle_pct = Math.round(idle)
             cpuPct.busy_pct = Math.round(Math.max(0, 100 - idle - iowait - steal))
+            // Steal is CPU the hypervisor withheld: quota throttling.
             const pressured = steal > 50
             if (pressured && !stealPressure) {
                 stealPressure = true
-                console.warn(
-                    `[cpu] steal pressure: hypervisor withheld ${Math.round(steal)}% of CPU this interval — quota throttling`
-                )
+                log('warn', 'cpu.steal_pressure', { steal_pct: Math.round(steal) })
             } else if (!pressured && stealPressure) {
                 stealPressure = false
-                console.warn(`[cpu] steal recovered: ${Math.round(steal)}%`)
+                log('warn', 'cpu.steal_recovered', { steal_pct: Math.round(steal) })
             }
         }
     }
@@ -2085,7 +2502,10 @@ function admissionSlotOf(res: express.Response): AdmissionSlot | undefined {
 }
 
 let inFlight = 0
+// The highest inFlight since the last stats line, which resets it.
+let inFlightPeak = 0
 let shedTotal = 0
+let timeoutsTotal = 0
 let pingsFastPathed = 0
 let skippedAfterTimeout = 0
 let batchesRejected = 0
@@ -2126,7 +2546,11 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
         shedTotal++
         if (!shedding) {
             shedding = true
-            console.warn(`[admission] shedding: ${reason}`)
+            log('warn', 'admission.shedding', {
+                reason,
+                in_flight: inFlight,
+                event_loop_lag_ms: Math.round(recentLagMs),
+            })
         }
         res.status(503)
             .set('Retry-After', String(SHED_RETRY_AFTER_SECONDS))
@@ -2150,10 +2574,11 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
             inFlight--
             if (shedding && !overloadReason()) {
                 shedding = false
-                console.warn(
-                    `[admission] recovered: ${inFlight} in flight, ` +
-                        `${Math.round(recentLagMs)} ms loop lag, ${shedTotal} shed so far`
-                )
+                log('warn', 'admission.recovered', {
+                    in_flight: inFlight,
+                    event_loop_lag_ms: Math.round(recentLagMs),
+                    shed_total: shedTotal,
+                })
             }
         },
     }
@@ -2179,6 +2604,7 @@ export const admissionControl: express.RequestHandler = (req, res, next) => {
     // means anything that throws in between leaks a slot permanently, and enough
     // leaks silently pin the server in shedding with nothing actually running.
     inFlight++
+    if (inFlight > inFlightPeak) inFlightPeak = inFlight
     next()
 }
 
@@ -2197,8 +2623,14 @@ const REQUEST_TIMEOUT_MS = Math.max(
 
 export const requestTimeout: express.RequestHandler = (req, res, next) => {
     const timer = setTimeout(() => {
+        timeoutsTotal++
+        // The timer runs in the request's context, so the line names the
+        // method, tool and client that hung. Sampled: when the API stalls,
+        // every in-flight call times out at once.
+        const fields = { timeout_ms: REQUEST_TIMEOUT_MS, streamed: res.headersSent }
+        const ctx = currentRequestContext()
+        logSampled('warn', 'request.timeout', `request.timeout:${ctx?.mcp_method}:${ctx?.tool}`, 20, fields)
         if (!res.headersSent) {
-            console.warn(`[timeout] request exceeded ${REQUEST_TIMEOUT_MS} ms, returning 504`)
             // The 504 answers the client, but the middleware chain is still
             // suspended somewhere upstream of the handler (body parse of a slow
             // upload, a Clerk round trip). When it resumes it would build an MCP
@@ -2221,9 +2653,6 @@ export const requestTimeout: express.RequestHandler = (req, res, next) => {
         // back, and MAX_IN_FLIGHT hung calls would leave the server shedding
         // permanently. Destroy the stream to force the connection down, and
         // release explicitly rather than relying on teardown ordering.
-        console.warn(
-            `[timeout] streamed request exceeded ${REQUEST_TIMEOUT_MS} ms, destroying connection`
-        )
         res.destroy()
         admissionSlotOf(res)?.release()
     }, REQUEST_TIMEOUT_MS)
@@ -2248,12 +2677,46 @@ function authSourceFrom(authInfo: AuthInfo | undefined): AuthSource {
         : { kind: 'none' }
 }
 
+// The SDK reports through onerror every request it refuses, and nearly all of
+// them are a client's protocol mistake that it answers with a 4xx: headers that
+// disagree with the body (-32020), an unsupported protocol version, a missing
+// capability, a non-JSON content type. Those are logged without a stack and
+// sampled per kind; each used to print a stack trace, one client's worth per
+// second. Anything else is this server's problem and keeps its stack.
+const SDK_REJECTION = /^Rejected (?:inbound request|2025-era request on a modern-only endpoint) \(([A-Za-z0-9-]+)\)/
+const SDK_REFUSALS: Array<[RegExp, string]> = [
+    [/^Unsupported Media Type/, 'unsupported-media-type'],
+    [/^subscriptions\/listen refused/, 'listen-limit'],
+    [/^requestState verification rejected/, 'request-state'],
+]
+
+export function logSdkError(source: 'handler' | 'adapter', error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error))
+    const rejection =
+        SDK_REJECTION.exec(err.message)?.[1] ??
+        (err instanceof ProtocolError
+            ? err.constructor.name
+            : SDK_REFUSALS.find(([pattern]) => pattern.test(err.message))?.[1])
+    if (rejection) {
+        logSampled('info', 'mcp.rejected', `mcp.rejected:${rejection}`, 5, {
+            rejection,
+            ...(err instanceof ProtocolError && { rpc_code: err.code }),
+            error: err.message.split('\n')[0]!.slice(0, 300),
+        })
+        return
+    }
+    logSampled('error', 'mcp.error', `mcp.error:${source}:${err.message.slice(0, 60)}`, 30, {
+        source,
+        ...errorFields(err, { stack: true }),
+    })
+}
+
 const mcpHttp = createMcpHandler(
     (ctx) => createMcpServer(authSourceFrom(ctx.authInfo), { events: ctx.era === 'modern' }),
-    { onerror: (error) => console.error('[mcp] request error:', error) }
+    { onerror: (error) => logSdkError('handler', error) }
 )
 const mcpNodeHandler = toNodeHandler(mcpHttp, {
-    onerror: (error) => console.error('[mcp] adapter error:', error),
+    onerror: (error) => logSdkError('adapter', error),
 })
 
 // MCP request handler. Only POST reaches this handler: text/html GETs are
@@ -2289,7 +2752,7 @@ export const mcpHandler: express.RequestHandler = async (req, res) => {
         // express.json already consumed the stream; hand the parsed body over.
         await mcpNodeHandler(req as never, res as never, req.body)
     } catch (error) {
-        console.error('[mcp] request error:', error)
+        log('error', 'mcp.handler_failed', errorFields(error, { stack: true }))
         if (!res.headersSent) {
             res.status(500).json({
                 jsonrpc: '2.0',
@@ -2420,7 +2883,9 @@ async function fullPathResult(method: string, params?: Record<string, unknown>):
  */
 export function loadProtocolSnapshot(): Promise<ProtocolSnapshot> {
     if (protocolSnapshot) return protocolSnapshot
-    protocolSnapshot = (async () => {
+    // Shared by every request after the one that triggers it, so its SDK
+    // traffic must not log as that request's.
+    protocolSnapshot = outsideRequestContext(async () => {
         const initializeJson = new Map<string, string>()
         for (const protocolVersion of SUPPORTED_PROTOCOL_VERSIONS) {
             const result = await fullPathResult('initialize', {
@@ -2432,15 +2897,11 @@ export function loadProtocolSnapshot(): Promise<ProtocolSnapshot> {
         }
         const toolsList = (await fullPathResult('tools/list')) as { tools: unknown[] }
         return { initializeJson, toolsListJson: JSON.stringify(toolsList), toolCount: toolsList.tools.length }
-    })()
+    })
     protocolSnapshot.catch(() => {
         protocolSnapshot = undefined
     })
     return protocolSnapshot
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -2501,7 +2962,9 @@ export const protocolFastPath: express.RequestHandler = async (req, res, next) =
             return
         }
     } catch (error) {
-        console.error('[fast-path] snapshot unavailable, using full path:', error)
+        // The request still gets its answer from the full path, and the next
+        // one retries the snapshot.
+        logSampled('error', 'fast_path.snapshot_unavailable', 'fast_path.snapshot_unavailable', 5, errorFields(error, { stack: true }))
     }
     next()
 }
@@ -2548,9 +3011,9 @@ function httpErrorLogMetadata(error: unknown, status: number): Record<string, st
     const safeToken = (value: unknown) =>
         typeof value === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(value) ? value : undefined
 
-    for (const key of ['name', 'type', 'code'] as const) {
+    for (const [key, field] of [['name', 'error_type'], ['type', 'error_kind'], ['code', 'error_code']] as const) {
         const value = safeToken(details[key])
-        if (value !== undefined) metadata[key] = value
+        if (value !== undefined) metadata[field] = value
     }
 
     if (status >= 500 && typeof details.stack === 'string') {
@@ -2560,7 +3023,7 @@ function httpErrorLogMetadata(error: unknown, status: number): Record<string, st
             .filter((line) => /^\s*at\s+/.test(line))
             .slice(0, 8)
             .map((line) => line.trim().slice(0, 240))
-        if (stackFrames.length > 0) metadata.stackFrames = stackFrames.join('\n')
+        if (stackFrames.length > 0) metadata.stack = stackFrames.join(' | ')
     }
 
     // Parser errors may carry the raw request in `body`; retain bounded stack
@@ -2587,12 +3050,7 @@ const mcpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) =
     if (res.headersSent) return next(error)
 
     const result = mapMcpRequestError(error)
-    if (result.status >= 500) {
-        console.error(
-            '[http] MCP request failed, returning sanitized JSON-RPC error',
-            httpErrorLogMetadata(error, result.status)
-        )
-    }
+    if (result.status >= 500) log('error', 'http.error', httpErrorLogMetadata(error, result.status))
     res.status(result.status).json({
         jsonrpc: '2.0',
         error: { code: result.code, message: result.message },
@@ -2605,6 +3063,7 @@ const mcpPipeline = [
     admissionControl,
     requestTimeout,
     parseJsonBody,
+    noteMcpRequest,
     rejectBatch,
     pingFastPath,
     clerkAuthBoundary,
@@ -2651,10 +3110,80 @@ if (CLERK_ENABLED) {
         try {
             res.json(await fetchClerkAuthServerMetadata(publishableKey))
         } catch (error) {
-            console.error('[oauth] authorization-server metadata unavailable:', error)
+            log('error', 'oauth.as_metadata_unavailable', errorFields(error))
             res.status(502).json({ error: 'authorization server metadata unavailable, retry shortly' })
         }
     })
+}
+
+// ============================================================================
+// Stats line
+//
+// Once a minute each machine logs one `stats` line: what it served in that
+// window and how it held up. It is what is left when the per-request lines are
+// gone (expired tokens, the junk client's 401s, sampled-away tool errors), and
+// it lines up with Manufact's per-minute analytics by `ts` and machine:
+//
+//   requests     responses by "<method> <status>"; `aborted` is a client that
+//                hung up or a stream a timeout destroyed. `http` is anything
+//                without an MCP method (GET/DELETE 405s, /health, metadata).
+//   tool_errors  failed tool calls by kind: API status, invalid arguments
+//                ("expected"), cancelled, no_status
+//   auth         how requests authenticated or why they were refused
+//   events       sheds, timeouts and the other counters /health keeps totals of
+//   suppressed   lines sampling held back, by event; dropped: lines over the
+//                process-wide rate ceiling
+//
+// Empty groups are left out, so a quiet minute is a short line.
+// ============================================================================
+
+const STATS_INTERVAL_MS = Math.max(
+    1000,
+    parseInt(process.env.AGENTMAIL_STATS_INTERVAL_MS || '', 10) || 60_000
+)
+const authDeltas = counterDeltas()
+const eventDeltas = counterDeltas()
+const logDeltas = counterDeltas()
+let statsWindowStart = Date.now()
+
+export function emitStats() {
+    const now = Date.now()
+    const { heapUsed, rss } = process.memoryUsage()
+    const fields: LogFields = {
+        window_s: Math.round((now - statsWindowStart) / 1000),
+        requests: requestOutcomes.take(),
+        tool_errors: toolErrorCounts.take(),
+        auth: authDeltas(authCounts),
+        events: eventDeltas({
+            shed: shedTotal,
+            timeouts: timeoutsTotal,
+            skipped_after_timeout: skippedAfterTimeout,
+            batches_rejected: batchesRejected,
+            clerk_timeouts: clerkTimeoutsTotal,
+            clerk_shed: clerkShedTotal,
+            accepted: acceptedTotal,
+            client_errors: clientErrorsTotal,
+        }),
+        in_flight: inFlight,
+        in_flight_peak: inFlightPeak,
+        event_loop_lag_ms: Math.round(recentLagMs),
+        event_loop_lag_peak_ms: Math.round(lagPeakMs),
+        heap_mb: Math.round(heapUsed / MB),
+        rss_mb: Math.round(rss / MB),
+        open_connections: openConnections,
+        open_fds: readOpenFds(),
+        steal_pct: cpuPct.steal_pct,
+        busy_pct: cpuPct.busy_pct,
+        suppressed: takeSuppressed(),
+        dropped: logDeltas({ lines: logCounters().dropped_total }).lines,
+    }
+    for (const [key, value] of Object.entries(fields)) {
+        if (value === undefined || value === null || (isPlainObject(value) && Object.keys(value).length === 0)) delete fields[key]
+    }
+    log('info', 'stats', fields)
+    statsWindowStart = now
+    inFlightPeak = inFlight
+    lagPeakMs = recentLagMs
 }
 
 app.get('/health', (_req, res) => {
@@ -2689,6 +3218,11 @@ app.get('/health', (_req, res) => {
             batches_rejected: batchesRejected,
             clerk: clerkStats(),
         },
+        // How requests authenticated, or why they were refused, since start.
+        // token_rejected is an expired or invalid Clerk token: every long-lived
+        // OAuth connection's daily expiry. Counted here instead of logged.
+        auth: { ...authCounts },
+        logs: logCounters(),
         // Where the queue is. Low in_flight + low lag + climbing latency means
         // the wait is upstream of the first middleware. If open_fds is near
         // max_fds the process cannot accept and the fix is ours; if both are
@@ -2714,11 +3248,8 @@ const httpErrorBoundary: express.ErrorRequestHandler = (error, _req, res, next) 
     if (res.headersSent) return next(error)
     const status = reportedHttpClientErrorStatus(error) ?? 500
     const metadata = httpErrorLogMetadata(error, status)
-    if (status >= 500) {
-        console.error('[http] Request failed, returning sanitized error', metadata)
-    } else {
-        console.warn('[http] Client request failed, returning sanitized error', metadata)
-    }
+    if (status >= 500) log('error', 'http.error', metadata)
+    else logSampled('info', 'http.client_error', `http.client_error:${status}`, 10, metadata)
     res.status(status).json({ error: status >= 500 ? 'Internal server error' : 'Request failed' })
 }
 app.use(httpErrorBoundary)
@@ -2757,11 +3288,12 @@ let heapSnapshotWritten = false
 setInterval(() => {
     const { heapUsed, rss } = process.memoryUsage()
     if (heapUsed < HEAP_WARN_BYTES) return
-    console.warn(
-        `[heap] pressure: used ${Math.round(heapUsed / MB)} MB of ${Math.round(
-            HEAP_LIMIT_BYTES / MB
-        )} MB limit (rss ${Math.round(rss / MB)} MB, warn threshold ${Math.round(HEAP_WARN_BYTES / MB)} MB)`
-    )
+    log('warn', 'heap.pressure', {
+        heap_used_mb: Math.round(heapUsed / MB),
+        heap_limit_mb: Math.round(HEAP_LIMIT_BYTES / MB),
+        rss_mb: Math.round(rss / MB),
+        warn_threshold_mb: Math.round(HEAP_WARN_BYTES / MB),
+    })
     if (!heapSnapshotWritten && process.env.AGENTMAIL_HEAP_SNAPSHOT === '1') {
         heapSnapshotWritten = true
         try {
@@ -2769,9 +3301,9 @@ setInterval(() => {
             const file = v8.writeHeapSnapshot(
                 dir ? `${dir.replace(/\/$/, '')}/agentmail-mcp-${Date.now()}.heapsnapshot` : undefined
             )
-            console.warn(`[heap] snapshot written to ${file}`)
+            log('warn', 'heap.snapshot_written', { file })
         } catch (error) {
-            console.error('[heap] snapshot failed:', error)
+            log('error', 'heap.snapshot_failed', errorFields(error))
         }
     }
 }, 30_000).unref()
@@ -2784,12 +3316,12 @@ setInterval(() => {
 
 function maskEnvVar(name: string): string {
     const val = process.env[name]
-    if (!val) return `${name}: <missing>`
+    if (!val) return '<missing>'
     // Safe prefix for keys that have a documented public prefix (pk_, sk_, am_).
     // For everything else we just report length.
     const firstChars = val.slice(0, 7)
     const safePrefix = /^(pk_|sk_|am_)/.test(firstChars) ? firstChars : '***'
-    return `${name}: present (len=${val.length}, prefix=${safePrefix})`
+    return `present (len=${val.length}, prefix=${safePrefix})`
 }
 
 // Last-resort containment. Node's default for an unhandled promise rejection
@@ -2801,7 +3333,7 @@ function maskEnvVar(name: string): string {
 // caused it gets no response and times out client-side; that is strictly
 // better than dropping everyone.
 process.on('unhandledRejection', (reason) => {
-    console.error('[fatal-contained] unhandled promise rejection:', reason)
+    log('error', 'process.unhandled_rejection', errorFields(reason, { stack: true }))
 })
 
 /**
@@ -2820,22 +3352,34 @@ export function startListening(port: number = PORT) {
     // object straight to http.Server.listen, which does accept { backlog }.
     const server = app.listen({ port, backlog: LISTEN_BACKLOG }, () => {
         const boundPort = (server.address() as { port: number } | null)?.port ?? port
-        console.log(`AgentMail MCP server running on port ${boundPort}`)
-        console.log(`MCP endpoints: http://localhost:${boundPort}/ and http://localhost:${boundPort}/mcp`)
-        console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
-        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'}`)
-        console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
-        console.log('--- env var diagnostic ---')
-        console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
-        console.log(maskEnvVar('CLERK_SECRET_KEY'))
-        console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
-        console.log(maskEnvVar('AGENTMAIL_API_URL'))
-        console.log(maskEnvVar('AGENTMAIL_API_KEY'))
-        console.log(maskEnvVar('MCP_PUBLIC_URL'))
-        console.log(`Max open files (soft): ${MAX_FDS ?? 'unknown'}`)
-        console.log(`Listen backlog: ${LISTEN_BACKLOG} (kernel somaxconn ${KERNEL.somaxconn ?? 'unknown'})`)
-        console.log(`Kernel TCP: ${JSON.stringify(KERNEL)}`)
-        console.log('--------------------------')
+        // One line: the boot banner used to be sixteen, which the log stream
+        // interleaved with the first requests' lines.
+        log('info', 'boot', {
+            port: boundPort,
+            build_sha: process.env.BUILD_SHA ?? 'unknown',
+            node: process.version,
+            region: process.env.FLY_REGION,
+            image: process.env.FLY_IMAGE_REF,
+            clerk_enabled: CLERK_ENABLED,
+            agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
+            mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
+            env: Object.fromEntries(
+                [
+                    'CLERK_PUBLISHABLE_KEY',
+                    'CLERK_SECRET_KEY',
+                    'CONSOLE_JWT_PRIVATE_KEY',
+                    'AGENTMAIL_API_URL',
+                    'AGENTMAIL_API_KEY',
+                    'MCP_PUBLIC_URL',
+                ].map((name) => [name, maskEnvVar(name)])
+            ),
+            heap_limit_mb: Math.round(HEAP_LIMIT_BYTES / MB),
+            max_fds: MAX_FDS ?? 'unknown',
+            listen_backlog: LISTEN_BACKLOG,
+            kernel: KERNEL,
+            protocol_fast_path: protocolFastPathEnabled(),
+            stats_interval_ms: STATS_INTERVAL_MS,
+        })
     })
 
     server.on('connection', () => {
@@ -2860,7 +3404,12 @@ export function startListening(port: number = PORT) {
         sampleCpu()
     }, 1000)
     sampler.unref()
-    server.on('close', () => clearInterval(sampler))
+    const stats = setInterval(emitStats, STATS_INTERVAL_MS)
+    stats.unref()
+    server.on('close', () => {
+        clearInterval(sampler)
+        clearInterval(stats)
+    })
 
     return server
 }
@@ -2893,7 +3442,7 @@ export function beginDrain(server: http.Server, options: DrainOptions = {}): Pro
     if (drainPromise) return drainPromise
     const { reason = 'signal', timeoutMs = DRAIN_TIMEOUT_MS, exit = (code) => process.exit(code) } = options
     draining = true
-    console.warn(`[drain] ${reason}: stopping accept, ${inFlight} in flight, waiting up to ${timeoutMs} ms`)
+    log('warn', 'drain.start', { reason, in_flight: inFlight, timeout_ms: timeoutMs })
 
     drainPromise = new Promise<void>((resolve) => {
         let settled = false
@@ -2902,7 +3451,9 @@ export function beginDrain(server: http.Server, options: DrainOptions = {}): Pro
             settled = true
             clearInterval(poll)
             clearTimeout(deadline)
-            console.warn(`[drain] ${how}: ${inFlight} in flight, exiting`)
+            // The partial window would otherwise be lost with the process.
+            emitStats()
+            log('warn', 'drain.exit', { how, in_flight: inFlight })
             // Anything still streaming past the deadline is torn down here so
             // the platform does not have to kill us for it.
             server.closeAllConnections()
@@ -2918,7 +3469,7 @@ export function beginDrain(server: http.Server, options: DrainOptions = {}): Pro
             if (inFlight <= 0) finish('drained')
         }, 50)
         poll.unref()
-        const deadline = setTimeout(() => finish(`deadline ${timeoutMs} ms reached`), timeoutMs)
+        const deadline = setTimeout(() => finish('deadline'), timeoutMs)
         deadline.unref()
         if (inFlight <= 0) finish('drained')
     })
@@ -2936,4 +3487,7 @@ function installDrainSignals(server: http.Server) {
     }
 }
 
-if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') installDrainSignals(startListening())
+if (process.env.AGENTMAIL_MCP_NO_LISTEN !== '1') {
+    installLogging()
+    installDrainSignals(startListening())
+}
