@@ -27,7 +27,7 @@ test('health identifies the build and human MCP navigation redirects before auth
     health.headers.get('strict-transport-security'),
     'max-age=31536000; includeSubDomains'
   )
-  const { heap, requests, sockets, tcp, cpu, auth, logs, ...healthRest } = await health.json()
+  const { heap, requests, sockets, tcp, cpu, auth, logs, machine, region, uptime_s, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
     clerk_enabled: false,
@@ -35,6 +35,12 @@ test('health identifies the build and human MCP navigation redirects before auth
     mcp_public_url: '(not set, using Host header)',
     build_sha: 'test-sha',
   })
+  // Which process answered: the machine id every log line carries, Fly's
+  // region for it (null off Fly), and its uptime.
+  assert.equal(typeof machine, 'string')
+  assert.equal(region, null)
+  assert.equal(typeof uptime_s, 'number')
+  assert.deepEqual(requests.edge_region, {})
   assert.ok(heap.used_mb > 0)
   assert.ok(heap.limit_mb >= heap.used_mb)
   assert.ok(heap.rss_mb > 0)

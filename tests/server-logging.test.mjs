@@ -25,6 +25,7 @@ process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.AGENTMAIL_API_URL = `http://127.0.0.1:${upstream.address().port}`
 const { app, installLogging, emitStats, logSdkError, apiErrorFields } = await import('../packages/server/build/index.js')
 const { setLogSink, resetSampling, redact, hashId, log } = await import('../packages/server/build/log.js')
+const { BoundedCounts } = await import('../packages/server/build/stats.js')
 
 // What production runs at startup: console output, agentmail-toolkit's
 // included, goes through the logger.
@@ -153,14 +154,16 @@ test('an API 5xx is an error line; email addresses in API messages are masked', 
         }
         await callTool(port, 'send_message', { inboxId: 'agent@agentmail.to', to: ['rpm389@gmail.com'], subject: 's', text: 't' })
     })
-    const [serverError, rejected] = events('tool.error')
-    assert.equal(serverError.level, 'error')
-    assert.equal(serverError.api_status, 500)
-    assert.equal(serverError.api_message, 'boom for <email>')
-    assert.equal(rejected.level, 'info')
-    assert.equal(rejected.api_message, 'Message rejected: Recipient(s) blocked: <email> (suppressed by AgentMail: Unsubscribed)')
-    assert.equal(JSON.stringify(lines).includes('@gmail.com'), false)
-    assert.equal(JSON.stringify(lines).includes('@example.com'), false)
+    const all = lines.join('\n')
+    const serverError = events('tool.error').find((line) => line.tool === 'list_inboxes')
+    const rejected = events('tool.error').find((line) => line.tool === 'send_message')
+    assert.equal(serverError?.level, 'error', all)
+    assert.equal(serverError.api_status, 500, all)
+    assert.equal(serverError.api_message, 'boom for <email>', all)
+    assert.equal(rejected?.level, 'info', all)
+    assert.equal(rejected.api_message, 'Message rejected: Recipient(s) blocked: <email> (suppressed by AgentMail: Unsubscribed)', all)
+    assert.equal(all.includes('@gmail.com'), false, all)
+    assert.equal(all.includes('@example.com'), false, all)
 })
 
 test('get_thread failures are logged and the client still gets the same text', async (t) => {
@@ -190,6 +193,36 @@ test('repeated 4xx failures are sampled; the stats line counts every one and wha
     assert.equal(stats.auth.api_key, 8)
     // The stats line belongs to no request.
     assert.equal('req_id' in stats, false)
+})
+
+test('the Fly edge region a request came in through is on its lines, the stats line and /health; the client IP is nowhere', async (t) => {
+    const clientIp = '203.0.113.9'
+    let before
+    let after
+    await withServer(t, async (port) => {
+        const health = async () => (await (await fetch(`http://127.0.0.1:${port}/health`)).json()).requests.edge_region
+        before = await health()
+        await callTool(port, 'list_threads', { inboxId: 'agent@agentmail.to' }, {
+            'x-api-key': API_KEY,
+            'fly-region': 'ams',
+            'fly-client-ip': clientIp,
+            'x-forwarded-for': clientIp,
+        })
+        await rpc(port, { jsonrpc: '2.0', id: 1, method: 'ping' }, { 'fly-region': 'iad' })
+        await rpc(port, { jsonrpc: '2.0', id: 2, method: 'ping' }, { 'fly-region': 'iad, ams' })
+        emitStats()
+        after = await health()
+    })
+    assert.equal(events('tool.error')[0].edge_region, 'ams')
+    assert.deepEqual(events('stats')[0].edge_regions, { ams: 1, iad: 1, other: 1 })
+    for (const region of ['ams', 'iad', 'other']) assert.equal((after[region] ?? 0) - (before[region] ?? 0), 1, region)
+    assert.equal(lines.join('\n').includes(clientIp), false)
+})
+
+test('bounded counts keep at most their cap of keys and count the rest as other', () => {
+    const counts = new BoundedCounts(3)
+    for (const key of ['iad', 'ams', 'sjc', 'nrt', 'syd', 'iad']) counts.add(key)
+    assert.deepEqual(counts.toJSON(), { iad: 2, ams: 1, sjc: 1, other: 2 })
 })
 
 test('concurrent requests keep their own context', async (t) => {

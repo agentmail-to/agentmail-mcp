@@ -40,6 +40,8 @@ export type RequestLogContext = {
     client_version?: string
     /** The User-Agent, logged while clientInfo is unknown (2025-era calls after initialize). */
     ua?: string
+    /** The Fly edge region that received the request (Fly-Region), not this machine's region. */
+    edge_region?: string
     auth?: 'oauth' | 'api_key' | 'none'
     /** hashId of the API key or Clerk user. */
     actor?: string
@@ -50,7 +52,7 @@ export type RequestLogContext = {
 }
 
 // Fly sets FLY_MACHINE_ID; elsewhere the hostname tells processes apart.
-const MACHINE = process.env.FLY_MACHINE_ID || os.hostname()
+export const MACHINE = process.env.FLY_MACHINE_ID || os.hostname()
 
 const requestContexts = new AsyncLocalStorage<RequestLogContext>()
 
@@ -80,11 +82,12 @@ export function annotateRequest(fields: Partial<Omit<RequestLogContext, 'req_id'
 }
 
 /** A fresh context for an arriving request. */
-export function createRequestContext(userAgent?: string): RequestLogContext {
+export function createRequestContext(userAgent?: string, edgeRegion?: string): RequestLogContext {
     return {
         req_id: crypto.randomBytes(8).toString('hex'),
         started: performance.now(),
         ...(userAgent && { ua: userAgent.slice(0, 120) }),
+        ...(edgeRegion && { edge_region: edgeRegion }),
     }
 }
 

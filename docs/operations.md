@@ -254,6 +254,8 @@ request's context:
   envelope; `ua` stands in while they are unknown (2025-era calls after
   `initialize`).
 - `auth` (`oauth`, `api_key` or `none`), `actor` and `org` (pseudonyms, below).
+- `edge_region`: the Fly edge region that received the request (the
+  `Fly-Region` header), as opposed to this machine's own region (`FLY_REGION`).
 - `api_request_id`: the AgentMail API's `apigw-requestid` for a call it failed,
   to find that call in the API's own logs.
 - `duration_ms` since the request arrived.
@@ -279,8 +281,9 @@ printf 'agentmail-mcp:%s' "$id" | shasum -a 256 | cut -c1-12
 
 String fields are redacted on the way out. Email addresses become `<email>`
 (API error messages quote recipients), Clerk ids become their pseudonym, and API
-keys, bearer tokens and JWTs are masked. Tool arguments, URLs, query strings
-and API error bodies are never logged.
+keys, bearer tokens and JWTs are masked. Tool arguments, URLs, query strings,
+API error bodies and client IP addresses (`Fly-Client-IP`, `X-Forwarded-For`)
+are never logged.
 
 Events:
 
@@ -315,13 +318,23 @@ Events:
 
 The `stats` line reports, for the minute: `requests` by `"<method> <status>"`
 (`http` is anything without an MCP method; `aborted` is a client that hung up or
-a stream a timeout destroyed), `tool_errors` by kind, `auth` outcomes, `events`
+a stream a timeout destroyed), `edge_regions` (requests by the Fly edge region
+that received them), `tool_errors` by kind, `auth` outcomes, `events`
 (sheds, timeouts, accepted connections, client errors and the other counters
 `/health` totals), `in_flight` and its peak, event loop lag and its peak, heap,
 connections, CPU steal, and `suppressed`/`dropped`. Groups with nothing in them
 are left out. `AGENTMAIL_STATS_INTERVAL_MS` (default 60000) sets the interval.
 
-`/health` has the cumulative `auth` counters and `logs` (lines written by level,
-suppressed and dropped totals). `build_sha` reads `BUILD_SHA`, which Manufact does
+Edge regions are how a routing problem in front of Fly shows up. Cloudflare,
+in front of Manufact's gateway, hands traffic to Fly's anycast edge, and the two
+North-America-only latency episodes (2026-10-13..16 and 10-20..22: US ping p50
+from ~40 to ~180 ms, Europe and Asia unchanged) were that hand-off routing
+badly, not this code. Look for traffic moving to a different edge in
+`edge_regions` over those minutes.
+
+`/health` has the cumulative `auth` counters, `logs` (lines written by level,
+suppressed and dropped totals), `requests.edge_region` (requests since start
+by edge region, at most 40 regions and then `other`), and which process
+answered: `machine` (the `machine` on every log line), `region` and `uptime_s`. `build_sha` reads `BUILD_SHA`, which Manufact does
 not set; until it does, the `boot` line's `image` (`FLY_IMAGE_REF`) identifies the
 deployment.

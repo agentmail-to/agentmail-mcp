@@ -19,6 +19,27 @@ export class CountWindow {
 }
 
 /**
+ * Cumulative counts by key, for keys that come from outside (a header): at
+ * most `maxKeys` of them, after which new keys count as "other".
+ */
+export class BoundedCounts {
+    private readonly counts = new Map<string, number>()
+
+    constructor(private readonly maxKeys: number) {}
+
+    /** Count one for `key`, and return the key it was counted under. */
+    add(key: string): string {
+        const bucket = this.counts.has(key) || this.counts.size < this.maxKeys ? key : 'other'
+        this.counts.set(bucket, (this.counts.get(bucket) ?? 0) + 1)
+        return bucket
+    }
+
+    toJSON(): Record<string, number> {
+        return Object.fromEntries(this.counts)
+    }
+}
+
+/**
  * How much each cumulative counter grew since the previous call, leaving out
  * the ones that did not move. Totals live where /health reads them; the stats
  * line reports the change, so the two never disagree.

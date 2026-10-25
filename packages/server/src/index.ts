@@ -60,6 +60,7 @@ import {
     log,
     logCounters,
     logSampled,
+    MACHINE,
     outsideRequestContext,
     runWithRequestContext,
     takeSuppressed,
@@ -67,7 +68,7 @@ import {
     type LogLevel,
     type RequestLogContext,
 } from './log.js'
-import { CountWindow, counterDeltas } from './stats.js'
+import { BoundedCounts, CountWindow, counterDeltas } from './stats.js'
 
 // ============================================================================
 // Config
@@ -1988,6 +1989,23 @@ app.set('trust proxy', true)
 
 const requestOutcomes = new CountWindow()
 
+// Requests by the Fly edge region that received them: the Fly-Region request
+// header, where FLY_REGION is this machine's own region. Cloudflare (in front of
+// Manufact's gateway) hands traffic to Fly's anycast edge, and a routing change
+// there moves which edge it lands on. The two North-America-only latency
+// episodes (10/13-16 and 10/20-22, US ping p50 ~40 to ~180 ms with Europe and
+// Asia unchanged) were that, and this header is the only place it shows. Fly
+// has about 35 regions; the cap only matters for a client sending its own value.
+const edgeRegionTotals = new BoundedCounts(40)
+const edgeRegionWindow = new CountWindow()
+
+/** A Fly region code from the header, "other" for anything that is not one. */
+function edgeRegionOf(header: string | string[] | undefined): string | undefined {
+    const value = Array.isArray(header) ? header[0] : header
+    if (value === undefined) return undefined
+    return /^[a-z]{3}$/.test(value) ? value : 'other'
+}
+
 const COMMON_METHODS = new Set(['ping', 'initialize', 'server/discover', 'notifications/initialized', 'tools/list', 'tools/call'])
 
 /** A request's stats key: its MCP method when common, so clients cannot mint keys. */
@@ -2003,7 +2021,9 @@ function methodClass(method: string | undefined): string {
 let inboundHeadersLogged = false
 
 const beginRequest: express.RequestHandler = (req, res, next) => {
-    const context = createRequestContext(relayedUserAgent(req.headers['user-agent']))
+    const edgeRegion = edgeRegionOf(req.headers['fly-region'])
+    if (edgeRegion) edgeRegionWindow.add(edgeRegionTotals.add(edgeRegion))
+    const context = createRequestContext(relayedUserAgent(req.headers['user-agent']), edgeRegion)
     let settled = false
     const settle = () => {
         if (settled) return
@@ -3147,6 +3167,8 @@ if (CLERK_ENABLED) {
 //   requests     responses by "<method> <status>"; `aborted` is a client that
 //                hung up or a stream a timeout destroyed. `http` is anything
 //                without an MCP method (GET/DELETE 405s, /health, metadata).
+//   edge_regions requests by the Fly edge region that received them: a routing
+//                change between Cloudflare and Fly shows as traffic moving edges
 //   tool_errors  failed tool calls by kind: API status, invalid arguments
 //                ("expected"), cancelled, no_status
 //   auth         how requests authenticated or why they were refused
@@ -3172,6 +3194,7 @@ export function emitStats() {
     const fields: LogFields = {
         window_s: Math.round((now - statsWindowStart) / 1000),
         requests: requestOutcomes.take(),
+        edge_regions: edgeRegionWindow.take(),
         tool_errors: toolErrorCounts.take(),
         auth: authDeltas(authCounts),
         events: eventDeltas({
@@ -3216,6 +3239,11 @@ app.get('/health', (_req, res) => {
         agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
         mcp_public_url: MCP_PUBLIC_URL ?? '(not set, using Host header)',
         build_sha: process.env.BUILD_SHA ?? 'unknown',
+        // Which process answered: Fly's machine id (the `machine` on every log
+        // line) and region, and how long it has been up.
+        machine: MACHINE,
+        region: process.env.FLY_REGION ?? null,
+        uptime_s: Math.round(process.uptime()),
         heap: {
             used_mb: Math.round(heapUsed / MB),
             limit_mb: Math.round(HEAP_LIMIT_BYTES / MB),
@@ -3237,6 +3265,8 @@ app.get('/health', (_req, res) => {
             skipped_after_timeout: skippedAfterTimeout,
             batches_rejected: batchesRejected,
             clerk: clerkStats(),
+            // Requests since start by the Fly edge region that received them.
+            edge_region: edgeRegionTotals.toJSON(),
         },
         // How requests authenticated, or why they were refused, since start.
         // token_rejected is an expired or invalid Clerk token: every long-lived
@@ -3379,6 +3409,7 @@ export function startListening(port: number = PORT) {
             build_sha: process.env.BUILD_SHA ?? 'unknown',
             node: process.version,
             region: process.env.FLY_REGION,
+            uptime_s: Math.round(process.uptime()),
             image: process.env.FLY_IMAGE_REF,
             clerk_enabled: CLERK_ENABLED,
             agentmail_api_url: AGENTMAIL_API_URL ?? '(SDK default)',
