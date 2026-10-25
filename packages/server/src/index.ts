@@ -1328,15 +1328,21 @@ function extractApiKey(req: express.Request): string | undefined {
 }
 
 /**
- * 401 challenge identical in shape to the one @clerk/mcp-tools sends for a
- * missing Authorization header (status, WWW-Authenticate resource_metadata
- * pointer, body), so OAuth clients re-enter the discovery flow the same way
- * in both cases. URL composition mirrors getPRMUrl in @clerk/mcp-tools.
+ * 401 challenge for every unauthenticated request (status, WWW-Authenticate
+ * resource_metadata pointer, body), so OAuth clients re-enter the discovery
+ * flow the same way whatever was wrong with the credential. URL composition
+ * mirrors getPRMUrl in @clerk/mcp-tools.
+ *
+ * The pointer is a quoted-string, as RFC 9728 §5.1 writes it: a URL is not a
+ * valid auth-param token (":" and "/" are not tchars). This used to copy
+ * @clerk/mcp-tools' unquoted form, which the MCP TypeScript SDK's
+ * extractResourceMetadataUrl (what v1 clients call) cannot read, so those
+ * clients fell back to probing the well-known paths.
  */
 function sendOAuthChallenge(req: express.Request, res: express.Response) {
     const prmUrl = `${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource${req.originalUrl}`
     res.status(401)
-        .set({ 'WWW-Authenticate': `Bearer resource_metadata=${prmUrl}` })
+        .set({ 'WWW-Authenticate': `Bearer resource_metadata="${prmUrl.replace(/["\\]/g, '\\$&')}"` })
         .json({ error: 'Unauthorized' })
 }
 
