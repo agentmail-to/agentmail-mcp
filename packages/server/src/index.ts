@@ -744,8 +744,16 @@ function relayHeaders(userAgent: string | undefined): Record<string, string> | u
 
 // `clerkClientId` is the OAuth client the user authorized and `userAgent` the
 // MCP client's User-Agent (relayedUserAgent); both only travel to the API.
+// `getStarted` puts the user in the get_started test (inGetStartedTest).
 type AuthSource =
-    | { kind: 'clerk'; clerkUserId: string; clerkOrgId?: string; clerkClientId?: string; userAgent?: string }
+    | {
+          kind: 'clerk'
+          clerkUserId: string
+          clerkOrgId?: string
+          clerkClientId?: string
+          userAgent?: string
+          getStarted?: boolean
+      }
     | { kind: 'apiKey'; apiKey: string; userAgent?: string }
     | { kind: 'none' }
 
@@ -1106,10 +1114,10 @@ function registerEventMethods(server: McpServer, auth: AuthSource) {
 }
 
 // How long a 2026-07-28 client may cache tools/list (2025-era responses never carry cache fields).
-// Public: the list is the same for every caller, since it depends only on deployment config. It
-// changes only when a deploy changes a tool, so for up to this long after one a client may still
-// offer the previous list; tool calls themselves are never cached.
-const TOOLS_LIST_CACHE_HINT = { ttlMs: 5 * 60 * 1000, cacheScope: 'public' } as const
+// Private: during the get_started test half of OAuth users get one more tool, so a list cached for
+// one caller must not be served to another. It changes only with a deploy, so for up to this long
+// after one a client may still offer the previous list; tool calls themselves are never cached.
+const TOOLS_LIST_CACHE_HINT = { ttlMs: 5 * 60 * 1000, cacheScope: 'private' } as const
 
 /**
  * One MCP server for one request. The `events` capability is advertised to
@@ -1365,7 +1373,87 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
         )
     }
 
+    if (auth.kind === 'clerk' && auth.getStarted) {
+        server.registerTool(
+            'get_started',
+            {
+                title: 'Get started',
+                description:
+                    'Start here when the user is new to AgentMail, asks to set it up or try it, or has no ' +
+                    "inbox yet. Returns the account's inboxes, the signed-in user's own email address, and " +
+                    'the steps to a first email and calendar invitation from the agent, each sent only with ' +
+                    "the user's yes.",
+                // Empty rather than absent, so the handler is called as (args, ctx) like every other tool.
+                inputSchema: {},
+                outputSchema: {
+                    userEmail: z
+                        .string()
+                        .optional()
+                        .describe("The signed-in user's own email address; absent when their account has none"),
+                    inboxes: z
+                        .array(z.string())
+                        .describe("Addresses of up to five of the account's inboxes, newest first"),
+                    inboxCount: z.number().describe('How many inboxes the account has'),
+                    steps: z.array(z.string()).describe('What to do next, in order'),
+                },
+                annotations: {
+                    title: 'Get started',
+                    readOnlyHint: true,
+                    destructiveHint: false,
+                    idempotentHint: true,
+                    openWorldHint: false,
+                },
+            },
+            async (_args, ctx) => {
+                try {
+                    const [client, user] = await Promise.all([
+                        buildClientFromClerkUser(auth, ctx.mcpReq.signal),
+                        boundedClerkCall('getUser', () => clerkClient.users.getUser(auth.clerkUserId)),
+                    ])
+                    const page = await client.inboxes.list({ limit: 5 })
+                    const userEmail = user.primaryEmailAddress?.emailAddress
+                    const inboxes = page.inboxes.map((inbox) => inbox.inboxId)
+                    const structuredContent = {
+                        ...(userEmail && { userEmail }),
+                        inboxes,
+                        inboxCount: page.count,
+                        steps: getStartedSteps(userEmail, inboxes[0]),
+                    }
+                    return {
+                        content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }],
+                        structuredContent,
+                    }
+                } catch (error) {
+                    return toolFailure('get_started', error)
+                }
+            }
+        )
+    }
+
     return server
+}
+
+/**
+ * Whether an OAuth user is in the get_started test: half of them, by a stable hash of their
+ * Clerk user ID, so a user sees the same tool list on every request and every replica. MD5
+ * because PostHog's SQL has it, so analysis recomputes each user's group from creator_user_id
+ * on organization.created; it only splits users, it secures nothing. Changing the salt
+ * reassigns everyone mid-test.
+ */
+export function inGetStartedTest(clerkUserId: string): boolean {
+    return crypto.createHash('md5').update(`get_started_v1:${clerkUserId}`).digest()[0]! < 128
+}
+
+/** The steps get_started returns: a first inbox, then a first email and invitation to the user. */
+export function getStartedSteps(userEmail: string | undefined, inboxId: string | undefined): string[] {
+    const to = userEmail ?? "the user's own email address (ask them for it)"
+    return [
+        inboxId
+            ? `Use ${inboxId}, the newest inbox, unless the user names another. It is the agent's own address, not the user's mailbox.`
+            : "Create the agent's inbox with create_inbox, with a username and displayName that fit what the user wants it for, and tell the user its address. It is the agent's own address, not the user's mailbox.",
+        `Offer to send ${to} a short hello from that inbox. With the user's yes, send it with send_message and ask them to reply; when they say they have, read the reply with list_threads and get_thread.`,
+        `Offer to also send ${to} a calendar invitation. With the user's yes, call create_event on that inbox for a 15-minute event such as "Hello from your agent" tomorrow, with the user as the only attendee, sendInvites true, and their time zone (ask if you do not know it). Once they accept it in their calendar, get_event shows their response.`,
+    ]
 }
 
 // ============================================================================
@@ -1622,6 +1710,7 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
                 clerkOrgId: extractOrgIdFromClerkToken(token),
                 clerkClientId: authInfo.clientId,
                 userAgent,
+                getStarted: inGetStartedTest(authInfo.extra.userId),
             }
             return next()
         } catch (error) {
@@ -2429,10 +2518,10 @@ app.get(['/', '/mcp'], (req, res, next) => {
 // Protocol fast path: initialize, notifications/initialized, tools/list
 //
 // Excluding ping, 93% of production requests are these three (35% / 29% /
-// 29% over 30 days), and every one of them has a constant answer: this server
-// registers the same tools for every request, so initialize's capabilities
-// and tools/list's catalog never vary, and the only per-request content is
-// the request id and the negotiated protocol version. Yet each one built a
+// 29% over 30 days), and every one of them has a constant answer: initialize's
+// capabilities never vary, and tools/list has one catalog plus one for users
+// in the get_started test, so the only per-request content is the request id,
+// the negotiated protocol version, and which catalog. Yet each one built a
 // McpServer with every tool (zod → JSON schema for ~40 tools) and an SSE
 // transport. Measured: tools/list 2.3 ms CPU vs 0.25 ms for a ping on the
 // same path; initialize 0.8 ms.
@@ -2467,19 +2556,26 @@ type ProtocolSnapshot = {
     initializeJson: Map<string, string>
     /** Serialized tools/list result. */
     toolsListJson: string
+    /** The same for a user in the get_started test. */
+    getStartedToolsListJson: string
     toolCount: number
 }
 
 let protocolSnapshot: Promise<ProtocolSnapshot> | undefined
 
-/** One request through the full SDK path; returns the raw JSON-RPC result. */
-async function fullPathResult(method: string, params?: Record<string, unknown>): Promise<unknown> {
+/** One request through the full SDK path, as `auth`; returns the raw JSON-RPC result. */
+async function fullPathResult(
+    method: string,
+    params?: Record<string, unknown>,
+    auth: AuthSource = { kind: 'none' }
+): Promise<unknown> {
     const response = await mcpHttp.fetch(
         new Request('http://snapshot.invalid/mcp', {
             method: 'POST',
             headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
             body: JSON.stringify({ jsonrpc: '2.0', id: 0, method, ...(params && { params }) }),
-        })
+        }),
+        { authInfo: { token: '', clientId: '', scopes: [], extra: { [AUTH_SOURCE_KEY]: auth } } }
     )
     const text = await response.text()
     // The 2025-era leg answers as a one-event SSE stream; take its data line.
@@ -2516,12 +2612,27 @@ export function loadProtocolSnapshot(): Promise<ProtocolSnapshot> {
             initializeJson.set(protocolVersion, JSON.stringify(result))
         }
         const toolsList = (await fullPathResult('tools/list')) as { tools: unknown[] }
-        return { initializeJson, toolsListJson: JSON.stringify(toolsList), toolCount: toolsList.tools.length }
+        const getStartedToolsList = await fullPathResult('tools/list', undefined, {
+            kind: 'clerk',
+            clerkUserId: 'snapshot',
+            getStarted: true,
+        })
+        return {
+            initializeJson,
+            toolsListJson: JSON.stringify(toolsList),
+            getStartedToolsListJson: JSON.stringify(getStartedToolsList),
+            toolCount: toolsList.tools.length,
+        }
     })()
     protocolSnapshot.catch(() => {
         protocolSnapshot = undefined
     })
     return protocolSnapshot
+}
+
+/** The snapshot's tools/list answer for a caller: users in the get_started test get its catalog. */
+export function toolsListJsonFor(snapshot: ProtocolSnapshot, auth: AuthSource | undefined): string {
+    return auth?.kind === 'clerk' && auth.getStarted ? snapshot.getStartedToolsListJson : snapshot.toolsListJson
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -2582,7 +2693,7 @@ export const protocolFastPath: express.RequestHandler = async (req, res, next) =
             if (params !== undefined && !isPlainObject(params)) return next()
             const snapshot = await loadProtocolSnapshot()
             protocolFastPathed.tools_list++
-            sendJsonRpcResult(res, id, snapshot.toolsListJson)
+            sendJsonRpcResult(res, id, toolsListJsonFor(snapshot, req.authSource))
             return
         }
     } catch (error) {
