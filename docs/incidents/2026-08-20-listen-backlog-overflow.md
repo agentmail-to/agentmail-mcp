@@ -94,7 +94,7 @@ the kernel counters were the only place left to look and the answer was there.
 ## Follow-ups
 
 - Watch `tcp.tcp_ext.ListenOverflows` in `/health` after deploy; the server now
-  logs `[accept] backlog overflow` on the transition, so it will never again
+  logs `accept.overflow` (`[accept] backlog overflow` until 2026-10) on the transition, so it will never again
   require manual inspection.
 - If overflows persist at backlog 2048, the burst rate exceeds one machine's
   accept throughput: reduce per-request allocation on the accept path (lag
