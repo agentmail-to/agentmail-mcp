@@ -10,18 +10,18 @@ packages:
 #                             host confusion and SSRF normalization flaws
 #   ip-address <10.3.1  GHSA-mwp4-54f8-5fhr  leading-zero octet decoding, SSRF / trust-boundary bypass
 #
-# The hono pair is the same shape: the sdk declares hono ^4.11.4 and @hono/node-server ^1.19.9, so
-# both floors sit inside its ranges. @hono/node-server is loaded at runtime by the sdk's
-# streamableHttp transport, so these are in the deployed tree, not dev-only.
+# The SDK accepts hono ^4.11.4 and @hono/node-server ^1.19.9 || ^2.0.5. The fixed
+# Node adapter is 2.1.3 (GHSA-rmxm-3fg6-px4f); its Node >=20 requirement is also
+# the stdio bridge's supported minimum. Keep this runtime dependency patched.
 #   hono              <4.12.34  GHSA-f23p-vx2j-j53r  memo() retains SSR output across requests
 #                               GHSA-54fx-42gc-7vw4  algorithmic-complexity DoS in language middleware
 #                               GHSA-8j4g-w8fx-2239  ReDoS in CORS middleware via ACRH
-#   @hono/node-server <1.19.15  GHSA-frvp-7c67-39w9  serve-static path traversal on Windows
+#   @hono/node-server <2.1.3  GHSA-rmxm-3fg6-px4f  double-decoded static paths bypass middleware
 overrides:
   fast-uri: ^3.1.9
   ip-address: ^10.7.4
   hono: ^4.13.11
-  '@hono/node-server': ^1.19.15
+  '@hono/node-server': 2.1.3
   proxy-addr: ^2.0.8
   qs: ^6.16.1
   zod@4: ^4.6.7
