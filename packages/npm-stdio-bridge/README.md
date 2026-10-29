@@ -2,6 +2,8 @@
 
 `agentmail-mcp` is the supported stdio compatibility bridge for the canonical hosted AgentMail MCP server at `https://mcp.agentmail.to/mcp`. It loads tools and schemas from that server at runtime; it does not contain a separate AgentMail tool implementation.
 
+The npm bridge requires Node.js 20 or newer. Upgrade Node.js before adopting this bridge version if you currently use Node.js 18.
+
 Prefer connecting an MCP client directly to the hosted endpoint when it supports Streamable HTTP. For stdio-only clients:
 
 ```json

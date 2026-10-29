@@ -10,7 +10,7 @@ Use that Streamable HTTP endpoint directly when your client supports remote MCP.
 
 ## stdio compatibility
 
-Existing Node configurations continue to work through the npm bridge:
+The npm stdio bridge requires Node.js 20 or newer:
 
 ```json
 {
