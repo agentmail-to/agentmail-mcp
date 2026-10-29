@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { extractResourceMetadataUrl, extractWWWAuthenticateParams } from '@modelcontextprotocol/client'
 
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 // Well-formed (but fake) Clerk keys so CLERK_ENABLED is true and the OAuth
@@ -41,7 +42,7 @@ test('malformed Authorization headers get a 401 challenge instead of crashing th
     assert.equal(res.status, 401, `expected 401 for header ${JSON.stringify(authorization)}`)
     assert.match(
       res.headers.get('www-authenticate') ?? '',
-      /^Bearer resource_metadata=.*\/\.well-known\/oauth-protected-resource\/mcp$/,
+      /^Bearer resource_metadata="[^"]*\/\.well-known\/oauth-protected-resource\/mcp"$/,
       'challenge must point clients back into OAuth discovery',
     )
     assert.deepEqual(await res.json(), { error: 'Unauthorized' })
@@ -87,4 +88,24 @@ test('am_ API keys sent as Bearer tokens still route to the API-key path', async
     body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
   })
   assert.equal(res.status, 200)
+})
+
+test('the challenge pointer parses with both MCP SDK helpers', async (t) => {
+  const server = app.listen(0)
+  t.after(() => server.close())
+  await new Promise((resolve) => server.once('listening', resolve))
+  const { port } = server.address()
+
+  // No Authorization header: the challenge that starts OAuth discovery.
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
+  })
+  assert.equal(res.status, 401)
+  const expected = `http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`
+  // extractResourceMetadataUrl only reads the quoted form. It is what v1 SDK
+  // clients call, and it found nothing in the old unquoted pointer.
+  assert.equal(extractResourceMetadataUrl(res)?.href, expected)
+  assert.equal(extractWWWAuthenticateParams(res).resourceMetadataUrl?.href, expected)
 })
