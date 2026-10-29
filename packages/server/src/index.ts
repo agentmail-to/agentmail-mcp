@@ -894,6 +894,26 @@ export const getThreadPage = async (client: AgentMailClient, args: GetThreadPage
     return get.call(client.inboxes.threads, inboxId, threadId, request, requestOptions)
 }
 
+/**
+ * A message's recorded authentication verdicts in the shape get_message returns
+ * them (agentmail-toolkit 0.17's withMessageAuthentication). get_thread calls
+ * the SDK itself, so it projects them here: SDK 0.5.46 passes the field through
+ * in snake_case, an SDK regenerated from the current Fern definition in
+ * camelCase. Only string values are kept, so a verdict shape the API adds later
+ * cannot fail the output schema, whose parse then drops any key it does not
+ * declare. Without this the snake_case field was simply stripped.
+ */
+function withAuthenticationResults(message: unknown): unknown {
+    if (!isPlainObject(message)) return message
+    const { authentication_results: raw, authenticationResults: typed, ...rest } = message
+    const source = isPlainObject(typed) ? typed : raw
+    if (!isPlainObject(source)) return rest
+    const verdicts = Object.entries(source)
+        .filter(([, value]) => typeof value === 'string')
+        .map(([key, value]) => [key.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase()), value])
+    return { ...rest, authenticationResults: Object.fromEntries(verdicts) }
+}
+
 const runGetThread = async (
     tool: (typeof STATIC_TOOLS)[number],
     client: AgentMailClient,
@@ -903,6 +923,7 @@ const runGetThread = async (
     const result = await getThreadPage(client, args as GetThreadPageArgs, signal)
     const normalized = normalizeToolResult({
         ...result,
+        ...(Array.isArray(result.messages) && { messages: result.messages.map(withAuthenticationResults) }),
         nextPageToken: result.nextPageToken ?? result.next_page_token,
     })
     const parsed = z.object(tool.outputSchema).safeParse(normalized)
