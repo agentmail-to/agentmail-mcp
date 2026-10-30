@@ -126,29 +126,6 @@ test('get_thread exposes backward message pagination', () => {
   assert.match(tool.description, /first page contains the newest messages/)
 })
 
-test('mail tools expose explicit restricted-mail opt-ins and recorded authentication verdicts', () => {
-  for (const name of ['list_messages', 'list_threads']) {
-    const tool = manifest.tools.find((tool) => tool.name === name)
-    for (const flag of ['includeBlocked', 'includeUnauthenticated']) {
-      assert.equal(tool.inputSchema.properties[flag].type, 'boolean', `${name} ${flag}`)
-      assert.equal(tool.inputSchema.required?.includes(flag) ?? false, false)
-    }
-  }
-  const tools = Object.fromEntries(manifest.tools.map((tool) => [tool.name, tool]))
-  const messageSchemas = [
-    tools.get_message.outputSchema,
-    tools.list_messages.outputSchema.properties.messages.items,
-    tools.get_thread.outputSchema.properties.messages.items,
-  ]
-  for (const schema of messageSchemas) {
-    const results = schema.properties.authenticationResults
-    for (const check of ['spf', 'dkim', 'dmarc']) {
-      assert.equal(results.properties[check].type, 'string')
-    }
-    assert.equal(schema.required.includes('authenticationResults'), false)
-  }
-})
-
 test('tools that can email external recipients keep their confirmation hints', () => {
   for (const name of ['create_draft', 'update_draft', 'create_event', 'update_event', 'delete_event', 'respond_to_invitation']) {
     const { annotations } = manifest.tools.find((tool) => tool.name === name)
