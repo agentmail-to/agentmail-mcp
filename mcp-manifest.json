@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:a30c650b488181a8dbb536b06b78e65ebcb6dc831cf29658422656a8643e7628",
+  "digest": "sha256:8fcd04dad84c6cce56baad57a2cd538dd86f6955b89a58b0f729add1777a2e95",
   "tools": [
     {
       "name": "list_inboxes",
@@ -76,6 +76,24 @@
                       "boolean"
                     ]
                   }
+                },
+                "signature": {
+                  "description": "Signature AgentMail adds to messages this inbox sends; absent when none is set",
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "description": "Signature added to the plain-text part of every message this inbox sends"
+                    },
+                    "html": {
+                      "description": "Signature added to the HTML part; absent when the HTML part uses text",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ],
+                  "additionalProperties": false
                 },
                 "updatedAt": {
                   "type": "string",
@@ -194,6 +212,24 @@
                     ]
                   }
                 },
+                "signature": {
+                  "description": "Signature AgentMail adds to messages this inbox sends; absent when none is set",
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "description": "Signature added to the plain-text part of every message this inbox sends"
+                    },
+                    "html": {
+                      "description": "Signature added to the HTML part; absent when the HTML part uses text",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
                 "updatedAt": {
                   "type": "string",
                   "format": "date-time",
@@ -281,6 +317,24 @@
               ]
             }
           },
+          "signature": {
+            "description": "Signature AgentMail adds to messages this inbox sends; absent when none is set",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "Signature added to the plain-text part of every message this inbox sends"
+              },
+              "html": {
+                "description": "Signature added to the HTML part; absent when the HTML part uses text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          },
           "updatedAt": {
             "type": "string",
             "format": "date-time",
@@ -342,6 +396,23 @@
                 "boolean"
               ]
             }
+          },
+          "signature": {
+            "description": "Signature AgentMail adds to every message this inbox sends, after your content and above any quoted message; not added again when the body already contains it",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "Signature for the plain-text part, at most 1,000 characters; line breaks are kept"
+              },
+              "html": {
+                "description": "HTML version for the HTML part, at most 4,000 characters; link a logo by URL. When omitted, the HTML part gets text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ]
           }
         }
       },
@@ -381,6 +452,24 @@
                 "boolean"
               ]
             }
+          },
+          "signature": {
+            "description": "Signature AgentMail adds to messages this inbox sends; absent when none is set",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "Signature added to the plain-text part of every message this inbox sends"
+              },
+              "html": {
+                "description": "Signature added to the HTML part; absent when the HTML part uses text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
           },
           "updatedAt": {
             "type": "string",
@@ -443,6 +532,30 @@
                 "type": "null"
               }
             ]
+          },
+          "signature": {
+            "description": "Replace the signature AgentMail adds to every message this inbox sends, or null to remove it",
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Signature for the plain-text part, at most 1,000 characters; line breaks are kept"
+                  },
+                  "html": {
+                    "description": "HTML version for the HTML part, at most 4,000 characters; link a logo by URL. When omitted, the HTML part gets text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -485,6 +598,24 @@
                 "boolean"
               ]
             }
+          },
+          "signature": {
+            "description": "Signature AgentMail adds to messages this inbox sends; absent when none is set",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "Signature added to the plain-text part of every message this inbox sends"
+              },
+              "html": {
+                "description": "Signature added to the HTML part; absent when the HTML part uses text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
           },
           "updatedAt": {
             "type": "string",
