@@ -93,10 +93,11 @@ async function messageOf(res) {
     )
 }
 
-test('2026-07-28 tools/list may be cached by any cache for five minutes; nothing else changes', async () => {
+test('2026-07-28 tools/list may be cached per caller for five minutes; nothing else changes', async () => {
     const { result: list } = await messageOf(await modern('tools/list'))
     assert.equal(list.ttlMs, 5 * 60 * 1000)
-    assert.equal(list.cacheScope, 'public')
+    // Private: users in the get_started test get a different list.
+    assert.equal(list.cacheScope, 'private')
 
     // server/discover keeps the SDK's conservative defaults.
     const { result: discover } = await messageOf(await modern('server/discover'))
