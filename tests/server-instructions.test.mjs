@@ -25,6 +25,11 @@ test('initialize returns the server instructions', async (t) => {
   assert.match(SERVER_INSTRUCTIONS, /AgentID/)
 })
 
+// Tools the Manufact gateway adds to tools/list in front of this server, so
+// they never appear in its own catalog. send_feedback: server settings,
+// Analytics, "Feedback tool". Drop it here and from the instructions together.
+const GATEWAY_TOOLS = new Set(['send_feedback'])
+
 // The instructions name tools by hand; a renamed or dropped tool would leave
 // the model pointed at something that no longer exists.
 test('every tool the instructions name is in the catalog', async (t) => {
@@ -34,7 +39,9 @@ test('every tool the instructions name is in the catalog', async (t) => {
   const named = new Set(SERVER_INSTRUCTIONS.match(/\b[a-z]+(?:_[a-z]+)+\b/g))
   assert.ok(named.has('connect_app'))
   assert.ok(named.has('authorize_inbox'))
-  for (const name of named) assert.ok(catalog.has(name), `instructions name unknown tool ${name}`)
+  for (const name of named)
+    assert.ok(catalog.has(name) || GATEWAY_TOOLS.has(name), `instructions name unknown tool ${name}`)
+  for (const name of GATEWAY_TOOLS) assert.ok(!catalog.has(name), `${name} is now a server tool, not a gateway one`)
 })
 
 test('the instructions stay short enough for clients that truncate', () => {
