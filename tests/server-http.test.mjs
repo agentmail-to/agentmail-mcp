@@ -4,6 +4,17 @@ import test from 'node:test'
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.BUILD_SHA = 'test-sha'
 const { app, mapMcpRequestError } = await import('../packages/server/build/index.js')
+const { setLogSink } = await import('../packages/server/build/log.js')
+
+/** The log lines written while `fn` runs, parsed. */
+async function captureLogs(t, fn) {
+  const lines = []
+  const restore = setLogSink((_level, line) => lines.push(line))
+  t.after(restore)
+  await fn()
+  restore()
+  return lines.map((line) => JSON.parse(line))
+}
 
 test('health identifies the build and human MCP navigation redirects before auth', async (t) => {
   const server = app.listen(0)
@@ -16,7 +27,7 @@ test('health identifies the build and human MCP navigation redirects before auth
     health.headers.get('strict-transport-security'),
     'max-age=31536000; includeSubDomains'
   )
-  const { heap, requests, sockets, tcp, cpu, ...healthRest } = await health.json()
+  const { heap, requests, sockets, tcp, cpu, auth, logs, machine, region, uptime_s, ...healthRest } = await health.json()
   assert.deepEqual(healthRest, {
     status: 'ok',
     clerk_enabled: false,
@@ -24,6 +35,12 @@ test('health identifies the build and human MCP navigation redirects before auth
     mcp_public_url: '(not set, using Host header)',
     build_sha: 'test-sha',
   })
+  // Which process answered: the machine id every log line carries, Fly's
+  // region for it (null off Fly), and its uptime.
+  assert.equal(typeof machine, 'string')
+  assert.equal(region, null)
+  assert.equal(typeof uptime_s, 'number')
+  assert.deepEqual(requests.edge_region, {})
   assert.ok(heap.used_mb > 0)
   assert.ok(heap.limit_mb >= heap.used_mb)
   assert.ok(heap.rss_mb > 0)
@@ -57,6 +74,16 @@ test('health identifies the build and human MCP navigation redirects before auth
   for (const k of ['steal_pct', 'busy_pct', 'idle_pct']) {
     assert.ok(k in cpu, `cpu.${k}`)
   }
+
+  // Refused authentications are counted here instead of logged per request
+  // (an expired Clerk token is every OAuth connection's daily routine), and
+  // the logger reports what it wrote and what sampling held back.
+  for (const k of ['api_key', 'oauth', 'none', 'no_credentials', 'token_rejected', 'malformed_header', 'clerk_rejected', 'missing_claims', 'handler_error']) {
+    assert.equal(typeof auth[k], 'number', `auth.${k}`)
+  }
+  for (const k of ['debug', 'info', 'warn', 'error']) assert.equal(typeof logs.lines[k], 'number', `logs.lines.${k}`)
+  assert.equal(typeof logs.suppressed_total, 'number')
+  assert.equal(typeof logs.dropped_total, 'number')
 
   const redirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
     headers: { accept: 'text/html' },
@@ -160,22 +187,24 @@ test('non-MCP route failures never expose diagnostics even in development', asyn
   const previousEnv = app.get('env')
   app.set('env', 'development')
   t.after(() => app.set('env', previousEnv))
-  const errorLogs = []
-  t.mock.method(console, 'error', (...args) => errorLogs.push(args))
   t.mock.method(process, 'memoryUsage', () => {
     throw new Error('private health diagnostic /srv/app/secret.ts:42')
   })
 
-  const res = await fetch(`http://127.0.0.1:${port}/health`)
+  let res
+  const logs = await captureLogs(t, async () => {
+    res = await fetch(`http://127.0.0.1:${port}/health`)
+  })
   assert.equal(res.status, 500)
   assert.match(res.headers.get('content-type') ?? '', /application\/json/)
   assert.deepEqual(await res.json(), { error: 'Internal server error' })
-  assert.equal(errorLogs.length, 1)
-  assert.equal(errorLogs[0][0], '[http] Request failed, returning sanitized error')
-  assert.equal(errorLogs[0][1].status, 500)
-  assert.equal(errorLogs[0][1].name, 'Error')
-  assert.match(errorLogs[0][1].stackFrames, /server-http\.test\.mjs/)
-  assert.equal(JSON.stringify(errorLogs).includes('private health diagnostic'), false)
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0].event, 'http.error')
+  assert.equal(logs[0].level, 'error')
+  assert.equal(logs[0].status, 500)
+  assert.equal(logs[0].error_type, 'Error')
+  assert.match(logs[0].stack, /server-http\.test\.mjs/)
+  assert.equal(JSON.stringify(logs).includes('private health diagnostic'), false)
 })
 
 test('non-MCP client errors preserve 4xx status and log only safe metadata', async (t) => {
@@ -183,11 +212,7 @@ test('non-MCP client errors preserve 4xx status and log only safe metadata', asy
   t.after(() => server.close())
   await new Promise((resolve) => server.once('listening', resolve))
   const { port } = server.address()
-  const errorLogs = []
-  const warningLogs = []
   const marker = 'sensitive-request-marker'
-  t.mock.method(console, 'error', (...args) => errorLogs.push(args))
-  t.mock.method(console, 'warn', (...args) => warningLogs.push(args))
   t.mock.method(process, 'memoryUsage', () => {
     throw Object.assign(new Error(marker), {
       statusCode: 429,
@@ -198,18 +223,24 @@ test('non-MCP client errors preserve 4xx status and log only safe metadata', asy
     })
   })
 
-  const res = await fetch(`http://127.0.0.1:${port}/health`)
+  let res
+  const logs = await captureLogs(t, async () => {
+    res = await fetch(`http://127.0.0.1:${port}/health`)
+  })
   assert.equal(res.status, 429)
   assert.match(res.headers.get('content-type') ?? '', /application\/json/)
   assert.deepEqual(await res.json(), { error: 'Request failed' })
-  assert.deepEqual(errorLogs, [])
-  assert.deepEqual(warningLogs, [
-    [
-      '[http] Client request failed, returning sanitized error',
-      { status: 429, name: 'Error', type: 'client.rate_limited', code: 'ERATELIMIT' },
-    ],
-  ])
-  assert.equal(JSON.stringify(warningLogs).includes(marker), false)
+  assert.equal(logs.length, 1)
+  const { ts, machine, req_id, duration_ms, ua, ...line } = logs[0]
+  assert.deepEqual(line, {
+    level: 'info',
+    event: 'http.client_error',
+    status: 429,
+    error_type: 'Error',
+    error_kind: 'client.rate_limited',
+    error_code: 'ERATELIMIT',
+  })
+  assert.equal(JSON.stringify(logs).includes(marker), false)
 })
 
 test('unsupported JSON charset returns a sanitized encoding error', async (t) => {
