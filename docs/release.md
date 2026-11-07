@@ -1,11 +1,40 @@
 # Release and rollback
 
+This document is the canonical release procedure for the hosted AgentMail MCP
+server and every first-party surface that distributes or documents its public
+contract. Do not infer downstream work from a particular release number or tool
+list. Use the generated `mcp-manifest.json` diff to decide what must ship.
+
+## Classify the change
+
+Regenerate the manifest before release work:
+
+```sh
+pnpm generate:manifest
+git diff -- mcp-manifest.json
+```
+
+An **implementation-only change** leaves the generated manifest, authentication
+behavior, permissions, and documented workflows unchanged. Deploy and verify the
+server, but do not create an artificial skills or plugin release.
+
+A **public-contract change** changes any tool name, input or output schema,
+description, annotation, authentication requirement, permission, endpoint, or
+user-visible workflow. It requires the downstream procedure below. A manifest
+digest change without a tool-name change still requires review: schema,
+description, or annotation changes can invalidate agent instructions.
+
+When classification is uncertain, treat the change as a public-contract change.
+
 ## Reversible preparation
 
 1. Build and test the hosted server and both bridge artifacts.
 2. Compare the preview runtime contract with `mcp-manifest.json`.
 3. Verify direct hosted, npm stdio, and PyPI stdio paths.
-4. Prepare first-party documentation and discovery commits.
+4. For a public-contract change, prepare coordinated pull requests in
+   [`agentmail-skills`](https://github.com/agentmail-to/agentmail-skills),
+   [`agentmail-plugins`](https://github.com/agentmail-to/agentmail-plugins), and
+   [`agentmail-docs`](https://github.com/agentmail-to/agentmail-docs).
 
 Record the Python bridge's current cancellation limitation from `docs/compatibility.md` in release notes until the MCP Python SDK exposes a supported upstream cancellation handle.
 
@@ -35,11 +64,104 @@ The daily `Public surfaces` audit backstops all of this: it fails when npm's or 
 1. Repoint the existing production project to this repository and canary it.
 2. Promote only after health, authentication-characterization, and tool-contract checks pass.
 3. Merge the npm bridge version bump to publish it, then publish PyPI with its manual workflow, and smoke-test clean installs.
-4. Publish first-party docs and discovery changes.
+4. Complete the first-party downstream release below.
 5. Repoint and authenticate a real call through Smithery.
 6. Publish Registry metadata and retire the duplicate identity.
 
 Do not archive duplicate repositories until the production rollback window and Smithery verification are complete.
+
+## First-party downstream release
+
+Run this section for every public-contract change. The order is intentional:
+canonical contract, canonical skills, generated plugin packages, documentation,
+then reviewed marketplaces.
+
+### 1. Verify the production contract
+
+Deploy the hosted server and confirm that its initialized tool catalog matches
+the committed `mcp-manifest.json`. Exercise authentication and error handling for
+every affected authorization mode. Verify tool annotations as well as schemas;
+clients use annotations to decide which calls require confirmation.
+
+Do not publish downstream instructions for a contract that is only present on a
+preview deployment.
+
+### 2. Synchronize canonical skills
+
+From an `agentmail-skills` checkout, with this repository checked out locally:
+
+```sh
+python3 scripts/skills.py sync --backend /path/to/agentmail-mcp
+python3 scripts/skills.py validate
+python3 scripts/skills.py build --check
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+Review every MCP-facing skill when the manifest digest changes, even when the
+tool-name set is unchanged. Merge the skills change before exporting the plugin.
+The skills repository is the only source for skill prose; generated copies must
+not be edited in the plugin repository.
+
+### 3. Build and release the cross-client plugin
+
+Export the canonical skills into an `agentmail-plugins` checkout:
+
+```sh
+python3 scripts/skills.py build --target /path/to/agentmail-plugins
+```
+
+Then follow the plugin repository's `docs/release.md`. That procedure owns
+manifest versioning, changelog and compatibility updates, packaging validation,
+client upgrade tests, and the Cursor review gate. A public-contract change is not
+complete merely because the plugin commit reached `main`.
+
+### 4. Update first-party documentation
+
+In `agentmail-docs`, refresh the vendored manifest and generated catalog only
+after the production contract is live:
+
+```sh
+python3 scripts/generate_mcp_tool_catalog.py --fetch
+```
+
+Update authentication, permissions, migration guidance, and workflows affected
+by the change. Keep plugin OAuth instructions separate from API-key instructions
+for standalone SDK, CLI, and manually configured MCP clients. Run the Fern check
+before merging.
+
+### 5. Read-only client acceptance
+
+Test a clean install and an upgrade of the previously published plugin in Claude
+Code, Codex, and Cursor. Start a new session or reload plugins, complete OAuth,
+and exercise representative read-only tools from every changed capability. Also
+inspect the advertised tool names and annotations.
+
+Do not create inboxes, send mail, delete data, or invoke account-connection tools
+during release acceptance. If a changed capability has no read-only operation,
+verify discovery and schema exposure without invoking it.
+
+Record the tested plugin commit, client versions, and result in the release pull
+request or release issue. A clean-install-only test is insufficient because it
+does not verify the existing-user upgrade path.
+
+### 6. Marketplace completion
+
+- **Claude Code:** change the plugin version whenever packaged content changes.
+  Verify an existing installation with
+  `claude plugin update agentmail@agentmail`, then apply it with
+  `/reload-plugins` or a new session.
+- **Codex:** refresh the Git marketplace with
+  `codex plugin marketplace upgrade agentmail`, then verify the installed plugin
+  in a new session.
+- **Cursor:** update the existing AgentMail public listing to the released plugin
+  commit. Do not create a replacement listing. Every public update is reviewed,
+  so wait for approval once submitted and do not resubmit an unchanged revision.
+  After approval, run `python3 scripts/check_cursor_marketplace.py` in the plugin
+  repository to confirm the live commit, description, and complete skill set.
+
+The release is complete only when required reviews are approved, public listing
+checks pass, documentation is live, and the read-only client acceptance record is
+attached to the release.
 
 ## PyPI trusted publishing
 

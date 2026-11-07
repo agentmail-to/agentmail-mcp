@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,13 +46,20 @@ STALE = (
 
 def fetch(url: str) -> tuple[int, bytes]:
     request = urllib.request.Request(url, headers={"User-Agent": "agentmail-mcp-surface-audit/1.0"})
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-    except (urllib.error.URLError, TimeoutError) as exc:
-        return 0, str(exc).encode()
+    result: tuple[int, bytes] = (0, b"")
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            result = (exc.code, exc.read())
+            if exc.code not in {429, 500, 502, 503, 504}:
+                return result
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            result = (0, str(exc).encode())
+        if attempt < 2:
+            time.sleep(2**attempt)
+    return result
 
 
 def registry(name: str) -> dict:
