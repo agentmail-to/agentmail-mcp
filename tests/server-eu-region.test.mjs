@@ -90,9 +90,7 @@ test('MCP Events with an am_eu_ key are forwarded to the EU API', async () => {
     assert.deepEqual(eu.requests.map((r) => [r.url, r.authorization]), [['/v0/mcp/events', 'Bearer am_eu_test_key']])
 })
 
-test('apiEndpointFor derives the EU WebSocket host the way the SDK names it', () => {
-    // The env override above points at a local stand-in; the default pairing
-    // is api.agentmail.eu -> ws.agentmail.eu, matching AgentMailEnvironment.EuProd.
+test('the EU override applies to am_eu_ keys only', () => {
     assert.equal(apiEndpointFor('am_eu_x').http, process.env.AGENTMAIL_EU_API_URL.replace(/\/$/, ''))
     assert.equal(apiEndpointFor('am_us_x').http, process.env.AGENTMAIL_API_URL)
     // Console JWTs (the OAuth path) are not API keys and keep the deployment backend.
