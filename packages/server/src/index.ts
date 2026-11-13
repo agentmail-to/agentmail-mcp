@@ -29,7 +29,7 @@
 import express from 'express'
 import cors from 'cors'
 import { clerkClient, clerkMiddleware } from '@clerk/express'
-import { AgentMailClient } from 'agentmail'
+import { AgentMailClient, AgentMailEnvironment } from 'agentmail'
 import { AgentMailToolkit } from 'agentmail-toolkit/mcp'
 import {
     McpServer,
@@ -77,20 +77,27 @@ const OPENAI_APPS_CHALLENGE_TOKEN = 'x5q5TTetk6mOB_sFlNKxXnvES1T8slSZXyWOL-T2b1s
 // deployment (staging vs prod). The previous behavior was an unset URL =
 // SDK default; we keep that as the fallback.
 const AGENTMAIL_API_URL = process.env.AGENTMAIL_API_URL
-const AGENTMAIL_WS_URL = AGENTMAIL_API_URL?.replace('https://api.', 'wss://ws.')
+const AGENTMAIL_WS_URL = AGENTMAIL_API_URL && wsUrlFor(AGENTMAIL_API_URL)
+
+/** The WebSocket base that pairs with an API base (api.<host> -> ws.<host>). */
+function wsUrlFor(apiUrl: string): string {
+    return apiUrl.replace('https://api.', 'wss://ws.')
+}
 
 // An organization lives in one region, and its API keys carry the region in
-// their prefix: am_eu_ keys authenticate only on the EU deployment, and every
-// call they make to the US host fails 403. AGENTMAIL_API_URL is the backend
-// for everything else (US keys, OAuth's console JWTs), so an EU key goes to the
-// EU host instead. Overridable for tests.
-const AGENTMAIL_EU_API_URL = (process.env.AGENTMAIL_EU_API_URL || 'https://api.agentmail.eu').replace(/\/$/, '')
+// their prefix: am_eu_ keys authenticate only on the EU deployment.
+// AGENTMAIL_API_URL is the backend for everything else (US keys, OAuth's
+// console JWTs), so an EU key goes to the SDK's EU environment instead.
+// AGENTMAIL_EU_API_URL overrides it for tests.
+const EU_API_URL_OVERRIDE = process.env.AGENTMAIL_EU_API_URL?.replace(/\/$/, '')
+const EU_ENVIRONMENT = EU_API_URL_OVERRIDE
+    ? { http: EU_API_URL_OVERRIDE, websockets: wsUrlFor(EU_API_URL_OVERRIDE) }
+    : AgentMailEnvironment.EuProd
 const EU_API_KEY_PREFIX = 'am_eu_'
 
 /** The API base and WebSocket base a credential's calls go to. Exported for tests. */
 export function apiEndpointFor(credential: string): { http: string; websockets: string } | undefined {
-    if (credential.startsWith(EU_API_KEY_PREFIX))
-        return { http: AGENTMAIL_EU_API_URL, websockets: AGENTMAIL_EU_API_URL.replace(/^https:\/\/api\./, 'wss://ws.') }
+    if (credential.startsWith(EU_API_KEY_PREFIX)) return EU_ENVIRONMENT
     return AGENTMAIL_API_URL ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' } : undefined
 }
 
@@ -2950,7 +2957,7 @@ export function startListening(port: number = PORT) {
         console.log(`AgentMail MCP server running on port ${boundPort}`)
         console.log(`MCP endpoints: http://localhost:${boundPort}/ and http://localhost:${boundPort}/mcp`)
         console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
-        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'} (am_eu_ keys: ${AGENTMAIL_EU_API_URL})`)
+        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'} (am_eu_ keys: ${EU_ENVIRONMENT.http})`)
         console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
         console.log('--- env var diagnostic ---')
         console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
