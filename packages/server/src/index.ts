@@ -14,11 +14,12 @@
  *
  *   2. API key (legacy, existing Cursor users):
  *      Client passes ?apiKey=am_... or x-api-key header. We hand the key
- *      straight to AgentMailClient. No Clerk involvement. EU keys (am_eu_)
- *      call the EU API; see apiEndpointFor.
+ *      straight to AgentMailClient. No Clerk involvement.
  *
  * The two paths are checked in order. If neither is present, authRouter
- * returns 401 + WWW-Authenticate to bootstrap the OAuth flow.
+ * returns 401 + WWW-Authenticate to bootstrap the OAuth flow. Either way, calls
+ * go to the organization's own region: an am_eu_ key's or an EU org's to the
+ * EU API (see apiEndpointFor).
  *
  * Protocol: MCP SDK v2. One handler serves both eras from the same server
  * factory: 2026-07-28 requests (server/discover, per-request envelope, no
@@ -84,21 +85,33 @@ function wsUrlFor(apiUrl: string): string {
     return apiUrl.replace('https://api.', 'wss://ws.')
 }
 
-// An organization lives in one region, and its API keys carry the region in
-// their prefix: am_eu_ keys authenticate only on the EU deployment.
-// AGENTMAIL_API_URL is the backend for everything else (US keys, OAuth's
-// console JWTs), so an EU key goes to the SDK's EU environment instead.
-// AGENTMAIL_EU_API_URL overrides it for tests.
+// An organization lives in one region, and only that region's deployment knows
+// it: its API keys authenticate nowhere else, and neither do console JWTs signed
+// for it. AGENTMAIL_API_URL is the US deployment; EU organizations go to the
+// SDK's EU environment. AGENTMAIL_EU_API_URL overrides it for tests.
+export type Region = 'us' | 'eu'
 const EU_API_URL_OVERRIDE = process.env.AGENTMAIL_EU_API_URL?.replace(/\/$/, '')
 const EU_ENVIRONMENT = EU_API_URL_OVERRIDE
     ? { http: EU_API_URL_OVERRIDE, websockets: wsUrlFor(EU_API_URL_OVERRIDE) }
     : AgentMailEnvironment.EuProd
-const EU_API_KEY_PREFIX = 'am_eu_'
 
-/** The API base and WebSocket base a credential's calls go to. Exported for tests. */
-export function apiEndpointFor(credential: string): { http: string; websockets: string } | undefined {
-    if (credential.startsWith(EU_API_KEY_PREFIX)) return EU_ENVIRONMENT
+/** The API base and WebSocket base for a region's deployment. Exported for tests. */
+export function apiEndpointFor(region: Region): { http: string; websockets: string } | undefined {
+    if (region === 'eu') return EU_ENVIRONMENT
     return AGENTMAIL_API_URL ? { http: AGENTMAIL_API_URL, websockets: AGENTMAIL_WS_URL || '' } : undefined
+}
+
+/** An API key's region, from the am_<region>_ prefix every key carries. Exported for tests. */
+export function apiKeyRegion(apiKey: string): Region {
+    return apiKey.startsWith('am_eu_') ? 'eu' : 'us'
+}
+
+/**
+ * A Clerk organization's region, from the `api_region` the console stores in
+ * its publicMetadata (console app/lib/regions.ts): 'eu', else US.
+ */
+function organizationRegion(publicMetadata: unknown): Region {
+    return (publicMetadata as Record<string, unknown> | null | undefined)?.api_region === 'eu' ? 'eu' : 'us'
 }
 
 const CLERK_ENABLED = Boolean(process.env.CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY)
@@ -126,11 +139,13 @@ const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL?.replace(/\/$/, '')
 // Console JWT signer
 // (ported from agentmail-web/apps/console/app/lib/agentmail-jwt.server.ts)
 //
-// The AgentMail backend trusts ES256 JWTs signed by CONSOLE_JWT_PRIVATE_KEY
-// with issuer=agentmail-console, audience=agentmail-api, subject=<orgId>.
-// This is the same auth path the console uses every request.
+// The AgentMail backend trusts ES256 JWTs signed by its region's console key
+// (CONSOLE_JWT_PRIVATE_KEY in the US, CONSOLE_EU_JWT_PRIVATE_KEY in the EU, the
+// console's names for the same keys) with issuer=agentmail-console,
+// audience=agentmail-api, subject=<orgId>. This is the same auth path the
+// console uses every request.
 //
-// The env var CONSOLE_JWT_PRIVATE_KEY accepts EITHER:
+// Each key env var accepts EITHER:
 //   - A raw multi-line PEM string (works for local .env files where
 //     newlines are preserved)
 //   - A single-line base64-encoded PEM (works for hosting platforms like
@@ -138,7 +153,7 @@ const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL?.replace(/\/$/, '')
 // We auto-detect by sniffing for the PEM header.
 // ============================================================================
 
-function decodeConsoleJwtPem(envValue: string): string {
+function decodeConsoleJwtPem(name: string, envValue: string): string {
     // Raw PEM: starts with "-----BEGIN" (after possible whitespace).
     if (envValue.trimStart().startsWith('-----BEGIN')) {
         return envValue
@@ -148,27 +163,28 @@ function decodeConsoleJwtPem(envValue: string): string {
     try {
         decoded = Buffer.from(envValue, 'base64').toString('utf8')
     } catch (error) {
-        throw new Error(`CONSOLE_JWT_PRIVATE_KEY is not raw PEM and base64 decode failed: ${error}`)
+        throw new Error(`${name} is not raw PEM and base64 decode failed: ${error}`)
     }
     if (!decoded.trimStart().startsWith('-----BEGIN')) {
         throw new Error(
-            'CONSOLE_JWT_PRIVATE_KEY does not look like raw PEM or base64-encoded PEM. ' +
+            `${name} does not look like raw PEM or base64-encoded PEM. ` +
                 'Expected the decoded value to start with "-----BEGIN".'
         )
     }
     return decoded
 }
 
-function getConsoleJwtKeyObject() {
-    const raw = process.env.CONSOLE_JWT_PRIVATE_KEY
+function getConsoleJwtKeyObject(region: Region) {
+    const name = region === 'eu' ? 'CONSOLE_EU_JWT_PRIVATE_KEY' : 'CONSOLE_JWT_PRIVATE_KEY'
+    const raw = process.env[name]
     if (!raw) {
-        throw new Error('CONSOLE_JWT_PRIVATE_KEY env var is required to use OAuth path')
+        throw new Error(`${name} env var is required to use OAuth path`)
     }
-    const pem = decodeConsoleJwtPem(raw)
+    const pem = decodeConsoleJwtPem(name, raw)
     try {
         return crypto.createPrivateKey({ key: pem, format: 'pem' })
     } catch (error) {
-        throw new Error(`Failed to import CONSOLE_JWT_PRIVATE_KEY: ${error}`)
+        throw new Error(`Failed to import ${name}: ${error}`)
     }
 }
 
@@ -183,9 +199,15 @@ function getConsoleJwtKeyObject() {
  *                        first MCP use from it, as `mcp_client_id`.
  * @param clientName      The name that client registered under (oauthClientName),
  *                        as `mcp_client_name`. Only beside its client id.
+ * @param region          The organization's region, whose console key signs.
  */
-export async function signConsoleJwt(organizationId: string, clientId?: string, clientName?: string): Promise<string> {
-    const privateKey = getConsoleJwtKeyObject()
+export async function signConsoleJwt(
+    organizationId: string,
+    clientId?: string,
+    clientName?: string,
+    region: Region = 'us'
+): Promise<string> {
+    const privateKey = getConsoleJwtKeyObject(region)
     const now = Math.floor(Date.now() / 1000)
     const client = clientId ? { mcp_client_id: clientId, ...(clientName && { mcp_client_name: clientName }) } : {}
 
@@ -234,11 +256,12 @@ function isOrganizationMappingUnavailable(status: number, body: string): boolean
  */
 export async function getInternalOrganizationId(
     clerkOrgId: string,
+    region: Region,
     dependencies?: InternalOrganizationLookupDependencies
 ): Promise<string> {
     const { apiUrl, signToken, fetcher, sleep: wait, retryDelaysMs } = dependencies ?? {
-        apiUrl: AGENTMAIL_API_URL,
-        signToken: signConsoleJwt,
+        apiUrl: apiEndpointFor(region)?.http,
+        signToken: (id: string) => signConsoleJwt(id, undefined, undefined, region),
         fetcher: fetch,
         sleep,
         retryDelaysMs: INTERNAL_ORG_RETRY_DELAYS_MS,
@@ -521,12 +544,16 @@ const internalOrgIdCache = new Map<string, string>()
  *
  * Paths 3/4 keep multi-org working for any session whose token carries no
  * org_id, so the consent-screen picker is an improvement, not a dependency.
+ *
+ * The JWT is signed for the chosen org's region and authenticates only there,
+ * so the region comes back with it for the caller to send its calls to.
+ * Exported for tests.
  */
-async function resolveClerkConsoleJwt(
+export async function resolveClerkConsoleJwt(
     clerkUserId: string,
     selectedClerkOrgId?: string,
     clientId?: string
-): Promise<string> {
+): Promise<{ jwt: string; region: Region }> {
     // Started first so it overlaps the membership and organization lookups.
     const clientName = clientId ? oauthClientName(clientId) : undefined
     const memberships = await listUserOrgMemberships(clerkUserId)
@@ -571,14 +598,15 @@ async function resolveClerkConsoleJwt(
     }
 
     const meta = chosenOrg.publicMetadata as Record<string, unknown>
+    const region = organizationRegion(meta)
     let internalOrgId = (meta?.internalOrgId as string | undefined) ?? internalOrgIdCache.get(chosenOrg.id)
     if (!internalOrgId) {
-        internalOrgId = await getInternalOrganizationId(chosenOrg.id)
+        internalOrgId = await getInternalOrganizationId(chosenOrg.id, region)
         if (internalOrgIdCache.size >= CLERK_CACHE_MAX_ENTRIES) internalOrgIdCache.clear()
         internalOrgIdCache.set(chosenOrg.id, internalOrgId)
     }
 
-    return signConsoleJwt(internalOrgId, clientId, await clientName)
+    return { jwt: await signConsoleJwt(internalOrgId, clientId, await clientName, region), region }
 }
 
 // ============================================================================
@@ -679,9 +707,9 @@ export async function oauthClientName(
  * reaches it. With no retries the error body comes straight back, and it
  * says when a retry can succeed; the MCP client decides whether to make one.
  */
-function buildClient(apiKey: string, signal?: AbortSignal, userAgent?: string): AgentMailClient {
+function buildClient(apiKey: string, region: Region, signal?: AbortSignal, userAgent?: string): AgentMailClient {
     return new AgentMailClient({
-        environment: apiEndpointFor(apiKey),
+        environment: apiEndpointFor(region),
         apiKey,
         fetch: fetchBoundTo(signal),
         maxRetries: 0,
@@ -694,8 +722,8 @@ async function buildClientFromClerkUser(
     auth: Extract<AuthSource, { kind: 'clerk' }>,
     signal?: AbortSignal
 ): Promise<AgentMailClient> {
-    const jwt = await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId, auth.clerkClientId)
-    return buildClient(jwt, signal, auth.userAgent)
+    const { jwt, region } = await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId, auth.clerkClientId)
+    return buildClient(jwt, region, signal, auth.userAgent)
 }
 
 /**
@@ -728,7 +756,7 @@ function fetchBoundTo(signal: AbortSignal | undefined): typeof fetch | undefined
  * Build an AgentMailClient from a raw API key (legacy path).
  */
 function buildClientFromApiKey(auth: Extract<AuthSource, { kind: 'apiKey' }>, signal?: AbortSignal): AgentMailClient {
-    return buildClient(auth.apiKey, signal, auth.userAgent)
+    return buildClient(auth.apiKey, apiKeyRegion(auth.apiKey), signal, auth.userAgent)
 }
 
 /**
@@ -1022,18 +1050,18 @@ const AGENTMAIL_API_BASE = AGENTMAIL_API_URL ?? 'https://api.agentmail.to'
 const CALLBACK_ENDPOINT_ERROR = -32015
 
 /**
- * The bearer for an API call made for this request, and for OAuth the user the
- * subscription belongs to. The console JWT names only the organization, so the
- * user travels as `principal`; the API accepts it from console credentials only,
- * and revokes on it when the user leaves the organization.
+ * The bearer for an API call made for this request, the region it authenticates
+ * in, and for OAuth the user the subscription belongs to. The console JWT names
+ * only the organization, so the user travels as `principal`; the API accepts it
+ * from console credentials only, and revokes on it when the user leaves the
+ * organization.
  */
-async function eventsCredential(auth: AuthSource): Promise<{ bearer: string; principal?: string }> {
-    if (auth.kind === 'apiKey') return { bearer: auth.apiKey }
-    if (auth.kind === 'clerk')
-        return {
-            bearer: await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId, auth.clerkClientId),
-            principal: `clerk_user:${auth.clerkUserId}`,
-        }
+async function eventsCredential(auth: AuthSource): Promise<{ bearer: string; region: Region; principal?: string }> {
+    if (auth.kind === 'apiKey') return { bearer: auth.apiKey, region: apiKeyRegion(auth.apiKey) }
+    if (auth.kind === 'clerk') {
+        const { jwt, region } = await resolveClerkConsoleJwt(auth.clerkUserId, auth.clerkOrgId, auth.clerkClientId)
+        return { bearer: jwt, region, principal: `clerk_user:${auth.clerkUserId}` }
+    }
     throw new ProtocolError(-32600, 'Not authenticated. Sign in via OAuth or provide an AgentMail API key.')
 }
 
@@ -1058,8 +1086,8 @@ async function callEventsApi(
 ): Promise<unknown> {
     let response: Response
     try {
-        const { bearer, principal } = await eventsCredential(auth)
-        response = await fetch(`${apiEndpointFor(bearer)?.http ?? AGENTMAIL_API_BASE}/v0/mcp/${path}`, {
+        const { bearer, region, principal } = await eventsCredential(auth)
+        response = await fetch(`${apiEndpointFor(region)?.http ?? AGENTMAIL_API_BASE}/v0/mcp/${path}`, {
             method: body === undefined ? 'GET' : 'POST',
             headers: {
                 Authorization: `Bearer ${bearer}`,
@@ -2957,12 +2985,13 @@ export function startListening(port: number = PORT) {
         console.log(`AgentMail MCP server running on port ${boundPort}`)
         console.log(`MCP endpoints: http://localhost:${boundPort}/ and http://localhost:${boundPort}/mcp`)
         console.log(`Clerk OAuth: ${CLERK_ENABLED ? 'enabled' : 'disabled (no CLERK_* env vars)'}`)
-        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'} (am_eu_ keys: ${EU_ENVIRONMENT.http})`)
+        console.log(`AgentMail API: ${AGENTMAIL_API_URL ?? '(SDK default)'} (EU organizations: ${EU_ENVIRONMENT.http})`)
         console.log(`Public URL override: ${MCP_PUBLIC_URL ?? '(not set, using Host header)'}`)
         console.log('--- env var diagnostic ---')
         console.log(maskEnvVar('CLERK_PUBLISHABLE_KEY'))
         console.log(maskEnvVar('CLERK_SECRET_KEY'))
         console.log(maskEnvVar('CONSOLE_JWT_PRIVATE_KEY'))
+        console.log(maskEnvVar('CONSOLE_EU_JWT_PRIVATE_KEY'))
         console.log(maskEnvVar('AGENTMAIL_API_URL'))
         console.log(maskEnvVar('AGENTMAIL_API_KEY'))
         console.log(maskEnvVar('MCP_PUBLIC_URL'))
