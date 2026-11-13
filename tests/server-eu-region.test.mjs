@@ -156,6 +156,21 @@ test('an EU organization whose internal id Clerk already holds skips the lookup'
     assert.ok(signedBy(jwt, euKey.publicKey))
 })
 
+test('an organization moved to the EU is looked up again there, not served its cached US id', async () => {
+    // api_region is set by hand, so an organization can move after this process
+    // has cached the id the US API gave it. A second member's lookup reads the
+    // moved organization; the first member's memberships stay cached as US.
+    await memberOf('user_before_move', { id: 'org_moving', name: 'Moving', publicMetadata: {} })
+    assert.equal((await resolveClerkConsoleJwt('user_before_move', 'org_moving')).region, 'us')
+    us.requests.length = 0
+
+    await memberOf('user_after_move', { id: 'org_moving', name: 'Moving', publicMetadata: { api_region: 'eu' } })
+    const { jwt, region } = await resolveClerkConsoleJwt('user_after_move', 'org_moving')
+    assert.equal(region, 'eu')
+    assert.deepEqual(eu.requests.map((r) => r.url), ['/v0/auth/internal-org'])
+    assert.equal(JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url')).organizationId, 'eu_internal_org')
+})
+
 test('without the EU console key, an EU organization fails naming the missing key', async () => {
     await memberOf('user_eu_nokey', { id: 'org_eu_nokey', name: 'EU', publicMetadata: { api_region: 'eu', internalOrgId: 'x' } })
     const saved = process.env.CONSOLE_EU_JWT_PRIVATE_KEY

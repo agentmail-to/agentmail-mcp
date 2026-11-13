@@ -512,9 +512,12 @@ export async function listUserOrgMemberships(
     return memberships
 }
 
-// Clerk org id → AgentMail internal org id. The mapping is immutable once the
-// organization webhook has written it, so a hit never goes stale; it only
-// saves the bootstrap round trip for orgs whose Clerk publicMetadata lacks it.
+// `<region>:<Clerk org id>` → AgentMail internal org id. Within a region the
+// mapping is immutable once the organization webhook has written it, so a hit
+// never goes stale; it only saves the bootstrap round trip for orgs whose Clerk
+// publicMetadata lacks it. The region is part of the key because the id comes
+// from that region's API, and api_region is set by hand, so an org can move
+// after its id here was cached.
 const internalOrgIdCache = new Map<string, string>()
 
 /**
@@ -599,11 +602,12 @@ export async function resolveClerkConsoleJwt(
 
     const meta = chosenOrg.publicMetadata as Record<string, unknown>
     const region = organizationRegion(meta)
-    let internalOrgId = (meta?.internalOrgId as string | undefined) ?? internalOrgIdCache.get(chosenOrg.id)
+    const cacheKey = `${region}:${chosenOrg.id}`
+    let internalOrgId = (meta?.internalOrgId as string | undefined) ?? internalOrgIdCache.get(cacheKey)
     if (!internalOrgId) {
         internalOrgId = await getInternalOrganizationId(chosenOrg.id, region)
         if (internalOrgIdCache.size >= CLERK_CACHE_MAX_ENTRIES) internalOrgIdCache.clear()
-        internalOrgIdCache.set(chosenOrg.id, internalOrgId)
+        internalOrgIdCache.set(cacheKey, internalOrgId)
     }
 
     return { jwt: await signConsoleJwt(internalOrgId, clientId, await clientName, region), region }
