@@ -90,8 +90,8 @@ only on the modern path made every ChatGPT subscription fail with `-32601`.
 
 The server only forwards: each method calls the AgentMail API's `/v0/mcp/*`
 route with the caller's own credential (the API key, or for OAuth the console
-JWT plus `principal: clerk_user:<id>`, since the console JWT names only the
-organization) and maps the answer to JSON-RPC. The API owns the catalog,
+JWT plus `principal: clerk_user:<id>`, the user the subscription belongs to)
+and maps the answer to JSON-RPC. The API owns the catalog,
 authorization, callback verification, storage, delivery and revocation. Error
 mapping: `422` with `reason` → `-32015` CallbackEndpointError (`data.reason`);
 `400`/`404` → `-32602`; `401`/`403` → `-32600` with the API message;

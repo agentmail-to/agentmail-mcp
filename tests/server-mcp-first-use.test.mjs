@@ -60,6 +60,26 @@ test('a tool call’s console JWT names the OAuth client and its name; the boots
     assert.equal('mcp_client_id' in bootstrap, false)
 })
 
+test('a tool call’s console JWT names the user who authorized the client; the bootstrap JWT does not', async () => {
+    const user = { id: 'user_2ada', email: 'ada@example.com' }
+    const toolCall = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', user))
+    assert.equal(toolCall.sub, 'internal_org')
+    assert.equal(toolCall.user_id, 'user_2ada')
+    assert.equal(toolCall.user_email, 'ada@example.com')
+
+    // A user without a known email goes alone; an email never travels without its user.
+    const noEmail = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', { id: 'user_2ada' }))
+    assert.equal(noEmail.user_id, 'user_2ada')
+    assert.equal('user_email' in noEmail, false)
+    const noUser = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', { email: 'ada@example.com' }))
+    assert.equal('user_id' in noUser, false)
+    assert.equal('user_email' in noUser, false)
+
+    const bootstrap = payload(await signConsoleJwt('org_clerk'))
+    assert.equal('user_id' in bootstrap, false)
+    assert.equal('user_email' in bootstrap, false)
+})
+
 test('the relayed user agent drops what fetch refuses in a header and is capped', () => {
     assert.equal(relayedUserAgent('Cursor/1.7.0 (darwin arm64)'), 'Cursor/1.7.0 (darwin arm64)')
     assert.equal(relayedUserAgent(' claude-code/2.1\t\u0000  '), 'claude-code/2.1')
