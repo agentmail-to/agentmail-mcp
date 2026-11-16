@@ -200,18 +200,24 @@ function getConsoleJwtKeyObject(region: Region) {
  * @param clientName      The name that client registered under (oauthClientName),
  *                        as `mcp_client_name`. Only beside its client id.
  * @param region          The organization's region, whose console key signs.
+ * @param user            The user who authorized that client, on the normal request
+ *                        path only: the API's audit log records them as the actor,
+ *                        from `user_id` (their Clerk user id) and `user_email`. An
+ *                        email only beside its user id.
  */
 export async function signConsoleJwt(
     organizationId: string,
     clientId?: string,
     clientName?: string,
-    region: Region = 'us'
+    region: Region = 'us',
+    user?: { id: string; email?: string }
 ): Promise<string> {
     const privateKey = getConsoleJwtKeyObject(region)
     const now = Math.floor(Date.now() / 1000)
     const client = clientId ? { mcp_client_id: clientId, ...(clientName && { mcp_client_name: clientName }) } : {}
+    const actor = user?.id ? { user_id: user.id, ...(user.email && { user_email: user.email }) } : {}
 
-    return await new SignJWT({ organizationId, ...client })
+    return await new SignJWT({ organizationId, ...client, ...actor })
         .setProtectedHeader({ alg: 'ES256' })
         .setIssuer('agentmail-console')
         .setAudience('agentmail-api')
@@ -512,6 +518,20 @@ export async function listUserOrgMemberships(
     return memberships
 }
 
+/**
+ * The user's email, from the public user data Clerk returns with each of their
+ * memberships, so it costs no Clerk call of its own. That data's `identifier` can
+ * also be a phone number, so only one with an @ is taken, and only from a
+ * membership of this user. Exported for tests.
+ */
+export function userEmailFromMemberships(
+    memberships: ReadonlyArray<{ publicUserData?: { userId?: string; identifier?: string | null } | null }>,
+    clerkUserId: string
+): string | undefined {
+    const identifier = memberships.find((m) => m.publicUserData?.userId === clerkUserId)?.publicUserData?.identifier
+    return typeof identifier === 'string' && identifier.includes('@') ? identifier : undefined
+}
+
 // `<region>:<Clerk org id>` → AgentMail internal org id. Within a region the
 // mapping is immutable once the organization webhook has written it, so a hit
 // never goes stale; it only saves the bootstrap round trip for orgs whose Clerk
@@ -610,7 +630,8 @@ export async function resolveClerkConsoleJwt(
         internalOrgIdCache.set(cacheKey, internalOrgId)
     }
 
-    return { jwt: await signConsoleJwt(internalOrgId, clientId, await clientName, region), region }
+    const user = { id: clerkUserId, email: userEmailFromMemberships(memberships, clerkUserId) }
+    return { jwt: await signConsoleJwt(internalOrgId, clientId, await clientName, region, user), region }
 }
 
 // ============================================================================
@@ -1055,8 +1076,8 @@ const CALLBACK_ENDPOINT_ERROR = -32015
 
 /**
  * The bearer for an API call made for this request, the region it authenticates
- * in, and for OAuth the user the subscription belongs to. The console JWT names
- * only the organization, so the user travels as `principal`; the API accepts it
+ * in, and for OAuth the user the subscription belongs to. The user travels as
+ * `principal`; the API accepts it
  * from console credentials only, and revokes on it when the user leaves the
  * organization.
  */
