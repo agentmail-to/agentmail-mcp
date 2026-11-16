@@ -62,16 +62,16 @@ test('a tool call’s console JWT names the OAuth client and its name; the boots
 
 test('a tool call’s console JWT names the user who authorized the client; the bootstrap JWT does not', async () => {
     const user = { id: 'user_2ada', email: 'ada@example.com' }
-    const toolCall = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', user))
+    const toolCall = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', 'us', user))
     assert.equal(toolCall.sub, 'internal_org')
     assert.equal(toolCall.user_id, 'user_2ada')
     assert.equal(toolCall.user_email, 'ada@example.com')
 
     // A user without a known email goes alone; an email never travels without its user.
-    const noEmail = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', { id: 'user_2ada' }))
+    const noEmail = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', 'us', { id: 'user_2ada' }))
     assert.equal(noEmail.user_id, 'user_2ada')
     assert.equal('user_email' in noEmail, false)
-    const noUser = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', { email: 'ada@example.com' }))
+    const noUser = payload(await signConsoleJwt('internal_org', 'Y0enFZG3FF8IFxZr', 'Cursor', 'us', { email: 'ada@example.com' }))
     assert.equal('user_id' in noUser, false)
     assert.equal('user_email' in noUser, false)
 

@@ -17,7 +17,7 @@ test('internal organization lookup waits for the Clerk webhook mapping', async (
   let signCalls = 0
   let fetchCalls = 0
 
-  const result = await getInternalOrganizationId('org_delayed', {
+  const result = await getInternalOrganizationId('org_delayed', 'us', {
     apiUrl: 'https://api.example.test',
     signToken: async () => {
       signCalls += 1
@@ -52,7 +52,7 @@ test('exhausted organization mapping retries return a retryable user-facing erro
   const waits = []
 
   await assert.rejects(
-    getInternalOrganizationId('org_still_provisioning', {
+    getInternalOrganizationId('org_still_provisioning', 'us', {
       apiUrl: 'https://api.example.test',
       signToken: async () => 'bootstrap-token',
       fetcher: async () => {
@@ -75,7 +75,7 @@ test('exhausted organization mapping retries return a retryable user-facing erro
 test('internal organization lookup does not retry unrelated 404 responses', async () => {
   let fetchCalls = 0
   await assert.rejects(
-    getInternalOrganizationId('org_missing_route', {
+    getInternalOrganizationId('org_missing_route', 'us', {
       apiUrl: 'https://api.example.test',
       signToken: async () => 'bootstrap-token',
       fetcher: async () => {
@@ -98,7 +98,7 @@ test('internal organization lookup does not retry unrelated 404 responses', asyn
 test('internal organization lookup does not retry unrelated upstream failures', async () => {
   let fetchCalls = 0
   await assert.rejects(
-    getInternalOrganizationId('org_broken', {
+    getInternalOrganizationId('org_broken', 'us', {
       apiUrl: 'https://api.example.test',
       signToken: async () => 'bootstrap-token',
       fetcher: async () => {
