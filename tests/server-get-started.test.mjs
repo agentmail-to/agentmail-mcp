@@ -5,6 +5,8 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client'
 
 process.env.AGENTMAIL_MCP_NO_LISTEN = '1'
 process.env.AGENTMAIL_API_URL = 'https://api.example.test'
+process.env.POSTHOG_API_KEY = 'phc_test'
+process.env.POSTHOG_HOST = 'https://posthog.example.test/'
 // As the manifest generator sets them: the Clerk client needs a key before it can be stubbed.
 process.env.CLERK_PUBLISHABLE_KEY ||= 'pk_test_contract'
 process.env.CLERK_SECRET_KEY ||= 'sk_test_contract'
@@ -87,12 +89,27 @@ test('get_started returns the user, the inboxes, and the steps, matching its out
     users.getOrganizationMembershipList = async () => ({
         data: [{ organization: { id: 'org_1', name: 'Org', publicMetadata: { internalOrgId: 'internal_1' } } }],
     })
-    globalThis.fetch = async (url) => {
+    const captured = []
+    let inboxesStatus = 200
+    globalThis.fetch = async (url, init) => {
+        if (String(url) === 'https://posthog.example.test/i/v0/e/') {
+            captured.push(JSON.parse(init.body))
+            // A failing PostHog must not fail the tool.
+            throw new Error('PostHog is down')
+        }
         assert.match(String(url), /\/v0\/inboxes\?limit=5$/)
+        if (inboxesStatus !== 200) return Response.json({ name: 'ServerError', message: 'down' }, { status: inboxesStatus })
         return Response.json({ count: 1, inboxes: [{ inbox_id: 'agent@agentmail.to', created_at: '2026-10-27T00:00:00Z' }] })
     }
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-    const auth = { kind: 'clerk', clerkUserId: 'user_get_started', getStarted: true, emailScope: true }
+    const auth = {
+        kind: 'clerk',
+        clerkUserId: 'user_get_started',
+        clerkOrgId: 'org_1',
+        userAgent: 'Cursor/1.0.0',
+        getStarted: true,
+        emailScope: true,
+    }
     const server = createMcpServer(auth)
     const client = new Client({ name: 'get-started-test', version: '1.0.0' })
     try {
@@ -117,6 +134,23 @@ test('get_started returns the user, the inboxes, and the steps, matching its out
         users.getUser = async () => assert.fail('looked up the user without the email scope')
         auth.emailScope = false
         assert.deepEqual((await client.callTool({ name: 'get_started', arguments: {} })).structuredContent, withoutEmail)
+
+        // Each call is reported to PostHog under the Clerk user, with no address in it.
+        inboxesStatus = 500
+        assert.equal((await client.callTool({ name: 'get_started', arguments: {} })).isError, true)
+        const event = (properties) => ({
+            api_key: 'phc_test',
+            event: 'mcp.get_started.called',
+            distinct_id: 'user_get_started',
+            properties: { ...properties, clerk_organization_id: 'org_1', mcp_user_agent: 'Cursor/1.0.0' },
+        })
+        const returned = { outcome: 'returned', inbox_count: 1, more_inboxes: false }
+        assert.deepEqual(captured, [
+            event({ ...returned, has_user_email: true }),
+            event({ ...returned, has_user_email: false }),
+            event({ ...returned, has_user_email: false }),
+            event({ outcome: 'failed' }),
+        ])
     } finally {
         Object.assign(users, stubbed)
         globalThis.fetch = realFetch

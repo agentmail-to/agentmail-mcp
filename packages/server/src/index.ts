@@ -85,6 +85,32 @@ function wsUrlFor(apiUrl: string): string {
     return apiUrl.replace('https://api.', 'wss://ws.')
 }
 
+// Product analytics, so far only for the get_started test. POSTHOG_API_KEY is the PostHog project
+// token, the public one the console ships to browsers; unset, nothing is sent.
+const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY
+const POSTHOG_HOST = (process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com').replace(/\/$/, '')
+
+/**
+ * Report an event to PostHog without delaying or failing the caller. `distinctId` is the Clerk
+ * user ID, which is what the console identifies people by, so the event joins their person.
+ * Properties are ids, counts and enums only: never an address or message content.
+ */
+function captureEvent(event: string, distinctId: string, properties: Record<string, unknown>): void {
+    if (!POSTHOG_API_KEY) return
+    fetch(`${POSTHOG_HOST}/i/v0/e/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: POSTHOG_API_KEY, event, distinct_id: distinctId, properties }),
+        signal: AbortSignal.timeout(3000),
+    }).then(
+        (response) => {
+            void response.body?.cancel()
+            if (!response.ok) console.warn(`[mcp] PostHog answered ${response.status} for ${event}`)
+        },
+        (error) => console.warn(`[mcp] could not report ${event} to PostHog:`, error)
+    )
+}
+
 // An organization lives in one region, and only that region's deployment knows
 // it: its API keys authenticate nowhere else, and neither do console JWTs signed
 // for it. AGENTMAIL_API_URL is the US deployment; EU organizations go to the
@@ -1511,6 +1537,14 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 },
             },
             async (_args, ctx) => {
+                // The test's readout compares sending between the two groups; this says how many
+                // in the group that has the tool were ever shown its steps.
+                const captureGetStarted = (properties: Record<string, unknown>) =>
+                    captureEvent('mcp.get_started.called', auth.clerkUserId, {
+                        ...properties,
+                        clerk_organization_id: auth.clerkOrgId,
+                        mcp_user_agent: auth.userAgent,
+                    })
                 try {
                     // The address is optional: without the email scope it is not looked up, and a
                     // Clerk failure leaves the agent to ask for it rather than failing the tool.
@@ -1531,11 +1565,18 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                         moreInboxes: Boolean(page.nextPageToken),
                         steps: getStartedSteps(userEmail, inboxes),
                     }
+                    captureGetStarted({
+                        outcome: 'returned',
+                        inbox_count: inboxes.length,
+                        more_inboxes: structuredContent.moreInboxes,
+                        has_user_email: Boolean(userEmail),
+                    })
                     return {
                         content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }],
                         structuredContent,
                     }
                 } catch (error) {
+                    captureGetStarted({ outcome: 'failed' })
                     return toolFailure('get_started', error)
                 }
             }

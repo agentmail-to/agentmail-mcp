@@ -241,3 +241,12 @@ machine. Pings are deliberately not rate limited and need no credentials: a
 rejected or dropped ping makes clients tear down and re-initialize (three
 full-path requests, ~200x the cost of answering), so the answer itself is the
 cheapest defense. `requests.pings_fast_path` in `/health` counts them.
+
+## Product analytics
+
+`get_started` reports each call to PostHog as `mcp.get_started.called`, with the Clerk user ID as the distinct ID, so it joins the person the console identifies. Properties: `outcome` (`returned` or `failed`), `inbox_count` (of the up to five listed), `more_inboxes`, `has_user_email`, `clerk_organization_id`, `mcp_user_agent`. No address or message content is sent.
+
+- `POSTHOG_API_KEY`: the PostHog project token (the public one the console uses). Unset, nothing is sent.
+- `POSTHOG_HOST` (default `https://us.i.posthog.com`).
+
+The request is not awaited and has a 3-second timeout: a slow or failing PostHog logs a warning and never delays or fails the tool.
