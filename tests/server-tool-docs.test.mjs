@@ -10,7 +10,8 @@ process.env.CLERK_SECRET_KEY ||= 'sk_test_contract'
 // agentmail-toolkit's docs test sets for its own: a field documented only by its name ("ID of
 // inbox", "Subject") tells an agent nothing, and Claude Code cuts descriptions at 2 KB.
 const { loadProtocolSnapshot } = await import('../packages/server/build/index.js')
-const { tools } = JSON.parse((await loadProtocolSnapshot()).toolsListJson)
+// The get_started test's catalog: every tool, plus get_started.
+const { tools } = JSON.parse((await loadProtocolSnapshot()).getStartedToolsListJson)
 
 const words = (text) => text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
 const FILLER = ['id', 'of', 'the', 'a', 'an', 'for', 'to']
