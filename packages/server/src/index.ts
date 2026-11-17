@@ -818,7 +818,8 @@ function relayHeaders(userAgent: string | undefined): Record<string, string> | u
 
 // `clerkClientId` is the OAuth client the user authorized and `userAgent` the
 // MCP client's User-Agent (relayedUserAgent); both only travel to the API.
-// `getStarted` puts the user in the get_started test (inGetStartedTest).
+// `getStarted` puts the user in the get_started test (inGetStartedTest); `emailScope` is whether
+// the token was granted `email`, without which get_started does not look up the user's address.
 type AuthSource =
     | {
           kind: 'clerk'
@@ -827,6 +828,7 @@ type AuthSource =
           clerkClientId?: string
           userAgent?: string
           getStarted?: boolean
+          emailScope?: boolean
       }
     | { kind: 'apiKey'; apiKey: string; userAgent?: string }
     | { kind: 'none' }
@@ -1491,11 +1493,13 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                     userEmail: z
                         .string()
                         .optional()
-                        .describe("The signed-in user's own email address; absent when their account has none"),
+                        .describe(
+                            "The signed-in user's own email address; absent when their account has none or it was not shared"
+                        ),
                     inboxes: z
                         .array(z.string())
                         .describe("Addresses of up to five of the account's inboxes, newest first"),
-                    inboxCount: z.number().describe('How many inboxes the account has'),
+                    moreInboxes: z.boolean().describe('Whether the account has more inboxes than those listed'),
                     steps: z.array(z.string()).describe('What to do next, in order'),
                 },
                 annotations: {
@@ -1508,18 +1512,24 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
             },
             async (_args, ctx) => {
                 try {
-                    const [client, user] = await Promise.all([
+                    // The address is optional: without the email scope it is not looked up, and a
+                    // Clerk failure leaves the agent to ask for it rather than failing the tool.
+                    const [client, userEmail] = await Promise.all([
                         buildClientFromClerkUser(auth, ctx.mcpReq.signal),
-                        boundedClerkCall('getUser', () => clerkClient.users.getUser(auth.clerkUserId)),
+                        auth.emailScope
+                            ? boundedClerkCall('getUser', () => clerkClient.users.getUser(auth.clerkUserId)).then(
+                                  (user) => user.primaryEmailAddress?.emailAddress,
+                                  (error) => void console.warn('[mcp] get_started could not read the user email:', error)
+                              )
+                            : undefined,
                     ])
                     const page = await client.inboxes.list({ limit: 5 })
-                    const userEmail = user.primaryEmailAddress?.emailAddress
                     const inboxes = page.inboxes.map((inbox) => inbox.inboxId)
                     const structuredContent = {
                         ...(userEmail && { userEmail }),
                         inboxes,
-                        inboxCount: page.count,
-                        steps: getStartedSteps(userEmail, inboxes[0]),
+                        moreInboxes: Boolean(page.nextPageToken),
+                        steps: getStartedSteps(userEmail, inboxes),
                     }
                     return {
                         content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }],
@@ -1547,12 +1557,14 @@ export function inGetStartedTest(clerkUserId: string): boolean {
 }
 
 /** The steps get_started returns: a first inbox, then a first email and invitation to the user. */
-export function getStartedSteps(userEmail: string | undefined, inboxId: string | undefined): string[] {
+export function getStartedSteps(userEmail: string | undefined, inboxes: string[]): string[] {
     const to = userEmail ?? "the user's own email address (ask them for it)"
     return [
-        inboxId
-            ? `Use ${inboxId}, the newest inbox, unless the user names another. It is the agent's own address, not the user's mailbox.`
-            : "Create the agent's inbox with create_inbox, with a username and displayName that fit what the user wants it for, and tell the user its address. It is the agent's own address, not the user's mailbox.",
+        inboxes.length > 1
+            ? "The account already has several inboxes, which may be in use: ask the user which one to use, or create a new one with create_inbox. It is the agent's own address, not the user's mailbox."
+            : inboxes[0]
+              ? `Use ${inboxes[0]}, the account's only inbox, unless the user names another. It is the agent's own address, not the user's mailbox.`
+              : "Create the agent's inbox with create_inbox, with a username and displayName that fit what the user wants it for, and tell the user its address. It is the agent's own address, not the user's mailbox.",
         `Offer to send ${to} a short hello from that inbox. With the user's yes, send it with send_message and ask them to reply; when they say they have, read the reply with list_threads and get_thread.`,
         `Offer to also send ${to} a calendar invitation. With the user's yes, call create_event on that inbox for a 15-minute event such as "Hello from your agent" tomorrow, with the user as the only attendee, sendInvites true, and their time zone (ask if you do not know it). Once they accept it in their calendar, get_event shows their response.`,
     ]
@@ -1753,7 +1765,7 @@ export async function fetchClerkAuthServerMetadata(
     }
 }
 
-const authRouter: express.RequestHandler = async (req, res, next) => {
+export const authRouter: express.RequestHandler = async (req, res, next) => {
     const userAgent = relayedUserAgent(req.headers['user-agent'])
     const apiKey = extractApiKey(req)
     if (apiKey) {
@@ -1813,6 +1825,7 @@ const authRouter: express.RequestHandler = async (req, res, next) => {
                 clerkClientId: authInfo.clientId,
                 userAgent,
                 getStarted: inGetStartedTest(authInfo.extra.userId),
+                emailScope: authInfo.scopes.includes('email'),
             }
             return next()
         } catch (error) {

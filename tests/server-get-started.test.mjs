@@ -12,7 +12,8 @@ process.env.CONSOLE_JWT_PRIVATE_KEY = generateKeyPairSync('ec', { namedCurve: 'P
     .privateKey.export({ type: 'pkcs8', format: 'pem' })
     .toString()
 
-const { createMcpServer, getStartedSteps, inGetStartedTest, loadProtocolSnapshot, toolsListJsonFor } = await import(
+const { authRouter, createMcpServer, getStartedSteps, inGetStartedTest, loadProtocolSnapshot, protocolFastPath, toolsListJsonFor } =
+    await import(
     '../packages/server/build/index.js'
 )
 // The server's own ESM copy of the Clerk client, whose users API is one shared object.
@@ -42,14 +43,40 @@ test('only OAuth users in the test get get_started in tools/list, on the fast pa
     assert.ok(!names(snapshot.toolsListJson).includes('get_started'))
 })
 
+test('an OAuth request gets its group\'s tools/list through authRouter and the fast path', async () => {
+    const snapshot = await loadProtocolSnapshot()
+    const ids = Array.from({ length: 50 }, (_, i) => `user_${i}`)
+    const listFor = async (userId, scopes) => {
+        const req = {
+            headers: { authorization: 'Bearer oauth-token', accept: 'application/json' },
+            query: {},
+            body: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+            auth: () => ({ isAuthenticated: true, tokenType: 'oauth_token', userId, clientId: 'client_1', scopes }),
+        }
+        let sent
+        const res = { status: () => res, set: () => res, send: (text) => (sent = text) }
+        await authRouter(req, res, () => {})
+        await protocolFastPath(req, res, () => assert.fail('not served by the fast path'))
+        return { result: JSON.stringify(JSON.parse(sent).result), authSource: req.authSource }
+    }
+    const inTest = await listFor(ids.find(inGetStartedTest), ['openid', 'email'])
+    assert.equal(inTest.result, snapshot.getStartedToolsListJson)
+    assert.equal(inTest.authSource.emailScope, true)
+    const others = await listFor(ids.find((id) => !inGetStartedTest(id)), ['openid'])
+    assert.equal(others.result, snapshot.toolsListJson)
+    assert.equal(others.authSource.emailScope, false)
+})
+
 test('get_started steps lead to a first inbox, email, and invitation, each needing the user', () => {
-    const [inbox, email, invite] = getStartedSteps('person@example.com', undefined)
+    const [inbox, email, invite] = getStartedSteps('person@example.com', [])
     assert.match(inbox, /create_inbox/)
     assert.match(email, /person@example\.com.*yes.*send_message/)
     assert.match(invite, /person@example\.com.*yes.*create_event.*sendInvites true/)
 
-    assert.match(getStartedSteps('person@example.com', 'agent@agentmail.to')[0], /^Use agent@agentmail\.to/)
-    assert.match(getStartedSteps(undefined, 'agent@agentmail.to')[1], /ask them for it/)
+    assert.match(getStartedSteps('person@example.com', ['agent@agentmail.to'])[0], /^Use agent@agentmail\.to/)
+    assert.match(getStartedSteps(undefined, ['agent@agentmail.to'])[1], /ask them for it/)
+    // An account with several inboxes is not pointed at one of them.
+    assert.match(getStartedSteps(undefined, ['a@agentmail.to', 'b@agentmail.to'])[0], /^The account already has several.*ask the user which/)
 })
 
 test('get_started returns the user, the inboxes, and the steps, matching its output schema', async () => {
@@ -62,10 +89,11 @@ test('get_started returns the user, the inboxes, and the steps, matching its out
     })
     globalThis.fetch = async (url) => {
         assert.match(String(url), /\/v0\/inboxes\?limit=5$/)
-        return Response.json({ count: 7, inboxes: [{ inbox_id: 'agent@agentmail.to', created_at: '2026-10-27T00:00:00Z' }] })
+        return Response.json({ count: 1, inboxes: [{ inbox_id: 'agent@agentmail.to', created_at: '2026-10-27T00:00:00Z' }] })
     }
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-    const server = createMcpServer({ kind: 'clerk', clerkUserId: 'user_get_started', getStarted: true })
+    const auth = { kind: 'clerk', clerkUserId: 'user_get_started', getStarted: true, emailScope: true }
+    const server = createMcpServer(auth)
     const client = new Client({ name: 'get-started-test', version: '1.0.0' })
     try {
         await server.connect(serverTransport)
@@ -76,9 +104,19 @@ test('get_started returns the user, the inboxes, and the steps, matching its out
         assert.deepEqual(result.structuredContent, {
             userEmail: 'person@example.com',
             inboxes: ['agent@agentmail.to'],
-            inboxCount: 7,
-            steps: getStartedSteps('person@example.com', 'agent@agentmail.to'),
+            moreInboxes: false,
+            steps: getStartedSteps('person@example.com', ['agent@agentmail.to']),
         })
+
+        // Without the address the tool still answers: Clerk failing, or no email scope.
+        const withoutEmail = { inboxes: ['agent@agentmail.to'], moreInboxes: false, steps: getStartedSteps(undefined, ['agent@agentmail.to']) }
+        users.getUser = async () => {
+            throw new Error('Clerk is down')
+        }
+        assert.deepEqual((await client.callTool({ name: 'get_started', arguments: {} })).structuredContent, withoutEmail)
+        users.getUser = async () => assert.fail('looked up the user without the email scope')
+        auth.emailScope = false
+        assert.deepEqual((await client.callTool({ name: 'get_started', arguments: {} })).structuredContent, withoutEmail)
     } finally {
         Object.assign(users, stubbed)
         globalThis.fetch = realFetch
