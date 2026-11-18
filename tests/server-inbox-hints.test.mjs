@@ -39,6 +39,12 @@ test('an account with no inboxes is told to create one, in the text and the stru
         // A later page that happens to be empty says nothing about the account.
         assert.equal((await call('list_inboxes', { pageToken: 'next' })).structuredContent.hint, undefined)
     })
+    // Nor does an empty first page with more to come: the next page may hold an inbox to reuse.
+    await withApi({ '/v0/inboxes': [200, { count: 0, inboxes: [], next_page_token: 'next' }] }, async (call) => {
+        const result = await call('list_inboxes', {})
+        assert.equal(result.structuredContent.nextPageToken, 'next')
+        assert.equal(result.structuredContent.hint, undefined)
+    })
 })
 
 test('an account with inboxes gets no hint', async () => {
@@ -61,5 +67,14 @@ test('a call with an inbox the account does not have says what an inboxId is', a
         const other = await call('list_messages', { inboxId: 'agent@agentmail.to' })
         assert.equal(other.isError, true)
         assert.doesNotMatch(other.content[0].text, /inboxId/)
+    })
+})
+
+test('get_thread, which calls the API itself, gives the same guidance for a missing inbox', async () => {
+    const notFound = [404, { name: 'NotFoundError', message: 'Inbox not found' }]
+    await withApi({ '/v0/inboxes/person%40gmail.com/threads/thread_1': notFound }, async (call) => {
+        const missing = await call('get_thread', { inboxId: 'person@gmail.com', threadId: 'thread_1' })
+        assert.equal(missing.isError, true)
+        assert.match(missing.content[0].text, /Inbox not found[^]*not the user's own email address.*list_inboxes.*create_inbox/)
     })
 })

@@ -969,11 +969,13 @@ type ToolResult = Awaited<ReturnType<typeof staticToolkit.invoke>>
 function withInboxHint(name: string, args: Record<string, unknown>, result: ToolResult): ToolResult {
     if (result.isError) {
         const [first] = result.content
-        if (first?.type !== 'text' || !first.text.startsWith('Inbox not found')) return result
+        if (first?.type !== 'text' || !first.text.includes('Inbox not found')) return result
         return { ...result, content: [{ ...first, text: `${first.text} ${MISSING_INBOX_HINT}` }] }
     }
-    const listed = result.structuredContent?.inboxes
-    if (name !== 'list_inboxes' || args.pageToken || !Array.isArray(listed) || listed.length) return result
+    // Only a whole listing that came back empty: a first page can be empty with more to come, when
+    // the API spent its query budget on inboxes that are being deleted.
+    const { inboxes, nextPageToken } = result.structuredContent ?? {}
+    if (name !== 'list_inboxes' || args.pageToken || nextPageToken || !Array.isArray(inboxes) || inboxes.length) return result
     const structuredContent = { ...result.structuredContent, hint: NO_INBOXES_HINT }
     return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
 }
@@ -1343,7 +1345,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 }
 
                 if (tool.name === 'get_thread') {
-                    return runGetThread(tool, client, args, signal)
+                    return await runGetThread(tool, client, args, signal)
                 }
 
                 // The toolkit's own callbacks are bound to the placeholder
@@ -1355,7 +1357,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 const { deletionId: _deletionId, ...structuredContent } = result.structuredContent
                 return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
             } catch (error) {
-                return toolFailure(tool.name, error)
+                return withInboxHint(tool.name, args, toolFailure(tool.name, error))
             }
         })
     }
