@@ -950,6 +950,35 @@ const STATIC_TOOLS = staticToolkit
         const { deletionId: _deletionId, ...outputSchema } = tool.outputSchema
         return { ...tool, outputSchema }
     })
+    .map((tool) =>
+        tool.name === 'list_inboxes'
+            ? { ...tool, outputSchema: { ...tool.outputSchema, hint: z.string().optional().describe('What to do next, when the account has no inboxes') } }
+            : tool
+    )
+
+// The two places new accounts stall (request logs, November 2026): the agent lists inboxes, finds
+// none and stops, or goes on to read or send with an inbox the account doesn't have. The server
+// instructions cover both, but the tool result is what the model is reading when it happens.
+const NO_INBOXES_HINT =
+    "This account has no inboxes yet. An AgentMail inbox is a new address of the agent's own, not the user's existing mailbox. If the task involves email, create one with create_inbox and tell the user its address."
+const MISSING_INBOX_HINT =
+    "An inboxId is the address of an inbox in this AgentMail account, not the user's own email address: list_inboxes shows them, and create_inbox makes one if there are none."
+
+type ToolResult = Awaited<ReturnType<typeof staticToolkit.invoke>>
+
+function withInboxHint(name: string, args: Record<string, unknown>, result: ToolResult): ToolResult {
+    if (result.isError) {
+        const [first] = result.content
+        if (first?.type !== 'text' || !first.text.includes('Inbox not found')) return result
+        return { ...result, content: [{ ...first, text: `${first.text} ${MISSING_INBOX_HINT}` }] }
+    }
+    // Only a whole listing that came back empty: a first page can be empty with more to come, when
+    // the API spent its query budget on inboxes that are being deleted.
+    const { inboxes, nextPageToken } = result.structuredContent ?? {}
+    if (name !== 'list_inboxes' || args.pageToken || nextPageToken || !Array.isArray(inboxes) || inboxes.length) return result
+    const structuredContent = { ...result.structuredContent, hint: NO_INBOXES_HINT }
+    return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
+}
 
 // The uniform failure shape every tool callback returns — one definition so a
 // change to the error contract (redaction, request ids) lands everywhere.
@@ -1316,19 +1345,19 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
                 }
 
                 if (tool.name === 'get_thread') {
-                    return runGetThread(tool, client, args, signal)
+                    return await runGetThread(tool, client, args, signal)
                 }
 
                 // The toolkit's own callbacks are bound to the placeholder
                 // client it was built with, so hand the per-call client to
                 // invoke(), which the toolkit added for this multi-tenant
                 // case, instead of building a fresh toolkit per call.
-                const result = await staticToolkit.invoke(tool.name, client, args, { signal })
+                const result = withInboxHint(tool.name, args, await staticToolkit.invoke(tool.name, client, args, { signal }))
                 if (tool.name !== 'delete_event' || !result.structuredContent) return result
                 const { deletionId: _deletionId, ...structuredContent } = result.structuredContent
                 return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
             } catch (error) {
-                return toolFailure(tool.name, error)
+                return withInboxHint(tool.name, args, toolFailure(tool.name, error))
             }
         })
     }
