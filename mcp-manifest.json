@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "server": "to.agentmail/agentmail",
   "endpoint": "https://mcp.agentmail.to/mcp",
-  "digest": "sha256:671f1f915111b7f4978f9c5d50158661bc883d2506c452ba1bfdaefa272b4167",
+  "digest": "sha256:9c9f7b071a2b5fbfb28769efc70c3d665402fa125b51efeef993f6a8882e6e35",
   "tools": [
     {
       "name": "list_inboxes",
@@ -119,7 +119,7 @@
             "description": "The inboxes on this page"
           },
           "hint": {
-            "description": "What to do next, when the account has no inboxes",
+            "description": "What to do next, when no inbox comes back",
             "type": "string"
           }
         },
@@ -256,6 +256,10 @@
               "additionalProperties": false
             },
             "description": "The inboxes on this page"
+          },
+          "hint": {
+            "description": "What to do next, when no inbox comes back",
+            "type": "string"
           }
         },
         "required": [
