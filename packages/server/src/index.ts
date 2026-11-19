@@ -85,8 +85,9 @@ function wsUrlFor(apiUrl: string): string {
     return apiUrl.replace('https://api.', 'wss://ws.')
 }
 
-// Product analytics, so far only for the get_started test. POSTHOG_API_KEY is the PostHog project
-// token, the public one the console ships to browsers; unset, nothing is sent.
+// Product analytics: the get_started test, and which tools OAuth users call each day.
+// POSTHOG_API_KEY is the PostHog project token, the public one the console ships to browsers;
+// unset, nothing is sent.
 const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY
 const POSTHOG_HOST = (process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com').replace(/\/$/, '')
 
@@ -109,6 +110,33 @@ function captureEvent(event: string, distinctId: string, properties: Record<stri
         },
         (error) => console.warn(`[mcp] could not report ${event} to PostHog:`, error)
     )
+}
+
+// The user, organization and tool combinations already reported on `toolUseDay` (UTC). Emptied
+// when the day changes, which is what bounds it.
+let toolUseDay = ''
+const toolUseReported = new Set<string>()
+
+/**
+ * Report that an OAuth user called a tool today, so analysis can tell who comes back, and for
+ * what, without reading request logs. One event a day per user, organization and tool from each
+ * instance; analysis counts distinct users, so repeats across instances and restarts do no harm.
+ */
+function captureToolUse(auth: Extract<AuthSource, { kind: 'clerk' }>, tool: string): void {
+    if (!POSTHOG_API_KEY) return
+    const day = new Date().toISOString().slice(0, 10)
+    if (day !== toolUseDay) {
+        toolUseReported.clear()
+        toolUseDay = day
+    }
+    const key = `${auth.clerkUserId}|${auth.clerkOrgId}|${tool}`
+    if (toolUseReported.has(key)) return
+    toolUseReported.add(key)
+    captureEvent('mcp.tool.used', auth.clerkUserId, {
+        tool,
+        clerk_organization_id: auth.clerkOrgId,
+        mcp_user_agent: auth.userAgent,
+    })
 }
 
 // An organization lives in one region, and only that region's deployment knows
@@ -1342,6 +1370,7 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
             try {
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
+                    captureToolUse(auth, tool.name)
                     client = await buildClientFromClerkUser(auth, signal)
                 } else if (auth.kind === 'apiKey') {
                     client = buildClientFromApiKey(auth, signal)
