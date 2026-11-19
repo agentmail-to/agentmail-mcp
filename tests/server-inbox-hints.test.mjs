@@ -56,6 +56,22 @@ test('an account with inboxes gets no hint', async () => {
     })
 })
 
+test('a search that finds no inbox says where inboxes come from, without claiming the account is empty', async () => {
+    await withApi({ '/v0/inboxes/search': [200, { count: 0, inboxes: [] }] }, async (call) => {
+        const result = await call('search_inboxes', { q: 'person@gmail.com' })
+        assert.equal(result.isError, false, result.content[0].text)
+        assert.match(result.structuredContent.hint, /No inbox in this account matches.*not the user's existing mailbox.*list_inboxes.*create_inbox/)
+        assert.doesNotMatch(result.structuredContent.hint, /no inboxes yet/)
+        assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent)
+    })
+    const inboxes = [{ inbox_id: 'agent@agentmail.to', email: 'agent@agentmail.to', created_at: '2026-10-27T00:00:00Z', updated_at: '2026-10-27T00:00:00Z' }]
+    await withApi({ '/v0/inboxes/search': [200, { count: 1, inboxes }] }, async (call) => {
+        const result = await call('search_inboxes', { q: 'agent' })
+        assert.equal(result.isError, false, result.content[0].text)
+        assert.equal(result.structuredContent.hint, undefined)
+    })
+})
+
 test('a call with an inbox the account does not have says what an inboxId is', async () => {
     const notFound = [404, { name: 'NotFoundError', message: 'Inbox not found' }]
     const down = [500, { name: 'ServerError', message: 'down' }]

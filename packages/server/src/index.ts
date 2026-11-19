@@ -951,8 +951,8 @@ const STATIC_TOOLS = staticToolkit
         return { ...tool, outputSchema }
     })
     .map((tool) =>
-        tool.name === 'list_inboxes'
-            ? { ...tool, outputSchema: { ...tool.outputSchema, hint: z.string().optional().describe('What to do next, when the account has no inboxes') } }
+        tool.name === 'list_inboxes' || tool.name === 'search_inboxes'
+            ? { ...tool, outputSchema: { ...tool.outputSchema, hint: z.string().optional().describe('What to do next, when no inbox comes back') } }
             : tool
     )
 
@@ -961,6 +961,10 @@ const STATIC_TOOLS = staticToolkit
 // instructions cover both, but the tool result is what the model is reading when it happens.
 const NO_INBOXES_HINT =
     "This account has no inboxes yet. An AgentMail inbox is a new address of the agent's own, not the user's existing mailbox. If the task involves email, create one with create_inbox and tell the user its address."
+// An empty search doesn't show the account is empty, so this one covers both cases.
+const NO_MATCHING_INBOX_HINT =
+    "No inbox in this account matches. search_inboxes finds only this account's AgentMail inboxes, which are addresses of the agent's own, not the user's existing mailbox: list_inboxes shows them all, and create_inbox makes one if there are none."
+const EMPTY_RESULT_HINTS: Record<string, string> = { list_inboxes: NO_INBOXES_HINT, search_inboxes: NO_MATCHING_INBOX_HINT }
 const MISSING_INBOX_HINT =
     "An inboxId is the address of an inbox in this AgentMail account, not the user's own email address: list_inboxes shows them, and create_inbox makes one if there are none."
 
@@ -975,8 +979,9 @@ function withInboxHint(name: string, args: Record<string, unknown>, result: Tool
     // Only a whole listing that came back empty: a first page can be empty with more to come, when
     // the API spent its query budget on inboxes that are being deleted.
     const { inboxes, nextPageToken } = result.structuredContent ?? {}
-    if (name !== 'list_inboxes' || args.pageToken || nextPageToken || !Array.isArray(inboxes) || inboxes.length) return result
-    const structuredContent = { ...result.structuredContent, hint: NO_INBOXES_HINT }
+    const hint = EMPTY_RESULT_HINTS[name]
+    if (!hint || args.pageToken || nextPageToken || !Array.isArray(inboxes) || inboxes.length) return result
+    const structuredContent = { ...result.structuredContent, hint }
     return { ...result, structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }] }
 }
 
