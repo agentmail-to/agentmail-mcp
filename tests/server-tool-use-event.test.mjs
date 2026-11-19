@@ -20,14 +20,20 @@ test('an OAuth user\'s tool calls are reported once a day per tool, and API-key 
     const users = clerkClient.users
     const realFetch = globalThis.fetch
     const realMemberships = users.getOrganizationMembershipList
-    users.getOrganizationMembershipList = async () => ({
-        data: [{ organization: { id: 'org_1', name: 'Org', publicMetadata: { internalOrgId: 'internal_1' } } }],
+    const realUser = users.getUser
+    const organization = (n) => ({ organization: { id: `org_${n}`, name: `Org ${n}`, publicMetadata: { internalOrgId: `internal_${n}` } } })
+    // user_tool_use has one organization; user_two_orgs has two and a stored choice between them.
+    let chosen = 'org_1'
+    users.getOrganizationMembershipList = async ({ userId }) => ({
+        data: userId === 'user_two_orgs' ? [organization(1), organization(2)] : [organization(1)],
     })
+    users.getUser = async () => ({ privateMetadata: { mcpSelectedOrgId: chosen } })
     const captured = []
+    let posthogStatus = 200
     globalThis.fetch = async (url, init) => {
         if (String(url) === 'https://posthog.example.test/i/v0/e/') {
             captured.push(JSON.parse(init.body))
-            return new Response(null, { status: 200 })
+            return new Response(null, { status: posthogStatus })
         }
         return Response.json({ count: 0, inboxes: [] })
     }
@@ -54,15 +60,33 @@ test('an OAuth user\'s tool calls are reported once a day per tool, and API-key 
         await call(user, ['list_inboxes'])
         await call({ kind: 'apiKey', apiKey: 'am_test' }, ['list_inboxes'])
 
-        const event = (tool) => ({
+        const event = (tool, distinctId = 'user_tool_use', n = 1) => ({
             api_key: 'phc_test',
             event: 'mcp.tool.used',
-            distinct_id: 'user_tool_use',
-            properties: { tool, clerk_organization_id: 'org_1', mcp_user_agent: 'Cursor/1.0.0' },
+            distinct_id: distinctId,
+            properties: { tool, organization_id: `internal_${n}`, clerk_organization_id: `org_${n}`, mcp_user_agent: 'Cursor/1.0.0' },
         })
         assert.deepEqual(captured, [event('list_inboxes'), event('search_inboxes')])
+
+        // A token that names no organization reports the one each call was routed to.
+        captured.length = 0
+        const twoOrgs = { kind: 'clerk', clerkUserId: 'user_two_orgs', userAgent: 'Cursor/1.0.0' }
+        await call(twoOrgs, ['list_inboxes'])
+        chosen = 'org_2'
+        await call(twoOrgs, ['list_inboxes', 'list_inboxes'])
+        assert.deepEqual(captured, [event('list_inboxes', 'user_two_orgs', 1), event('list_inboxes', 'user_two_orgs', 2)])
+
+        // An event PostHog did not take is sent again on the next call.
+        captured.length = 0
+        posthogStatus = 503
+        await call(twoOrgs, ['search_inboxes'])
+        await new Promise((resolve) => setImmediate(resolve))
+        posthogStatus = 200
+        await call(twoOrgs, ['search_inboxes', 'search_inboxes'])
+        assert.deepEqual(captured, [event('search_inboxes', 'user_two_orgs', 2), event('search_inboxes', 'user_two_orgs', 2)])
     } finally {
         users.getOrganizationMembershipList = realMemberships
+        users.getUser = realUser
         globalThis.fetch = realFetch
     }
 })

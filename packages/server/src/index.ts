@@ -95,10 +95,11 @@ const POSTHOG_HOST = (process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com').re
  * Report an event to PostHog without delaying or failing the caller. `distinctId` is the Clerk
  * user ID, which is what the console identifies people by, so the event joins their person.
  * Properties are ids, counts and enums only: never an address or message content.
+ * Resolves to whether PostHog took it, for a caller that will try again.
  */
-function captureEvent(event: string, distinctId: string, properties: Record<string, unknown>): void {
-    if (!POSTHOG_API_KEY) return
-    fetch(`${POSTHOG_HOST}/i/v0/e/`, {
+function captureEvent(event: string, distinctId: string, properties: Record<string, unknown>): Promise<boolean> {
+    if (!POSTHOG_API_KEY) return Promise.resolve(false)
+    return fetch(`${POSTHOG_HOST}/i/v0/e/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ api_key: POSTHOG_API_KEY, event, distinct_id: distinctId, properties }),
@@ -107,13 +108,17 @@ function captureEvent(event: string, distinctId: string, properties: Record<stri
         (response) => {
             void response.body?.cancel()
             if (!response.ok) console.warn(`[mcp] PostHog answered ${response.status} for ${event}`)
+            return response.ok
         },
-        (error) => console.warn(`[mcp] could not report ${event} to PostHog:`, error)
+        (error) => {
+            console.warn(`[mcp] could not report ${event} to PostHog:`, error)
+            return false
+        }
     )
 }
 
-// The user, organization and tool combinations already reported on `toolUseDay` (UTC). Emptied
-// when the day changes, which is what bounds it.
+// The user, organization and tool combinations reported, or being reported, on `toolUseDay`
+// (UTC). Emptied when the day changes, which is what bounds it.
 let toolUseDay = ''
 const toolUseReported = new Set<string>()
 
@@ -121,21 +126,30 @@ const toolUseReported = new Set<string>()
  * Report that an OAuth user called a tool today, so analysis can tell who comes back, and for
  * what, without reading request logs. One event a day per user, organization and tool from each
  * instance; analysis counts distinct users, so repeats across instances and restarts do no harm.
+ * The organization is the one the call was routed to, which the token does not always name.
  */
-function captureToolUse(auth: Extract<AuthSource, { kind: 'clerk' }>, tool: string): void {
+function captureToolUse(
+    auth: Extract<AuthSource, { kind: 'clerk' }>,
+    organization: { clerkOrgId: string; organizationId: string },
+    tool: string
+): void {
     if (!POSTHOG_API_KEY) return
     const day = new Date().toISOString().slice(0, 10)
     if (day !== toolUseDay) {
         toolUseReported.clear()
         toolUseDay = day
     }
-    const key = `${auth.clerkUserId}|${auth.clerkOrgId}|${tool}`
+    const key = `${auth.clerkUserId}|${organization.clerkOrgId}|${tool}`
     if (toolUseReported.has(key)) return
     toolUseReported.add(key)
-    captureEvent('mcp.tool.used', auth.clerkUserId, {
+    void captureEvent('mcp.tool.used', auth.clerkUserId, {
         tool,
-        clerk_organization_id: auth.clerkOrgId,
+        organization_id: organization.organizationId,
+        clerk_organization_id: organization.clerkOrgId,
         mcp_user_agent: auth.userAgent,
+    }).then((reported) => {
+        // PostHog did not take it, so the user's next call of this tool tries again.
+        if (!reported) toolUseReported.delete(key)
     })
 }
 
@@ -630,7 +644,7 @@ export async function resolveClerkConsoleJwt(
     clerkUserId: string,
     selectedClerkOrgId?: string,
     clientId?: string
-): Promise<{ jwt: string; region: Region }> {
+): Promise<{ jwt: string; region: Region; clerkOrgId: string; organizationId: string }> {
     // Started first so it overlaps the membership and organization lookups.
     const clientName = clientId ? oauthClientName(clientId) : undefined
     const memberships = await listUserOrgMemberships(clerkUserId)
@@ -685,7 +699,12 @@ export async function resolveClerkConsoleJwt(
     }
 
     const user = { id: clerkUserId, email: userEmailFromMemberships(memberships, clerkUserId) }
-    return { jwt: await signConsoleJwt(internalOrgId, clientId, await clientName, region, user), region }
+    return {
+        jwt: await signConsoleJwt(internalOrgId, clientId, await clientName, region, user),
+        region,
+        clerkOrgId: chosenOrg.id,
+        organizationId: internalOrgId,
+    }
 }
 
 // ============================================================================
@@ -1370,8 +1389,13 @@ export function createMcpServer(auth: AuthSource, options: { events?: boolean } 
             try {
                 let client: AgentMailClient
                 if (auth.kind === 'clerk') {
-                    captureToolUse(auth, tool.name)
-                    client = await buildClientFromClerkUser(auth, signal)
+                    const { jwt, region, ...organization } = await resolveClerkConsoleJwt(
+                        auth.clerkUserId,
+                        auth.clerkOrgId,
+                        auth.clerkClientId
+                    )
+                    captureToolUse(auth, organization, tool.name)
+                    client = buildClient(jwt, region, signal, auth.userAgent)
                 } else if (auth.kind === 'apiKey') {
                     client = buildClientFromApiKey(auth, signal)
                 } else {
